@@ -1,21 +1,24 @@
 /* ============================================================================
- * dsx_main.js v0.2 — 「DeepSeek 会话导出」App 注入脚本。
+ * dsx_main.js v0.3 — 「DeepSeek 会话导出」App 注入脚本。
  * 由 MainActivity 在 chat.deepseek.com 页面加载完成后注入（幂等）。
  *
- * 能力（真机验证点①）：
- *   - 点「导出当前对话」：读 localStorage.userToken → 同源请求
- *     /api/v0/chat/history_messages → 归一化并裁剪到当前分支 → 生成 HTML/TXT →
- *     经原生桥 DSExport.saveFile 存入系统 Download 目录 → 页内 + 原生双确认；
- *   - 「格式:HTML/TXT」切换（记忆在 localStorage）；
- *   - 悬浮胶囊可拖动；面板常驻诊断：登录态、最近动作、计数徽章、日志，
- *     失败时用户可照抄日志反馈具体现象。
+ * v0.3 变化（真机验证 v0.2 后的用户反馈）：
+ *   - 导出只存 Markdown（.md），不再出 HTML/TXT 文件；
+ *   - 导出内容同时存在 App 内（「最近导出」最多 10 条，localStorage 持久化、
+ *     满则自动缩减），每条可一键复制全文 / 就地查看；
+ *   - 悬浮胶囊更醒目：加大加粗、亮蓝底、白描边、光晕。
+ *
+ * 链路（沿用已验证事实）：读 localStorage.userToken → 同源请求
+ * /api/v0/chat/history_messages → 归一化裁剪当前分支 → buildMd →
+ * 经原生桥 DSExport.saveFile 存入系统 Download 目录 + App 内缓存 →
+ * 页内 + 原生双确认；复制走 DSExport.copy（原生剪贴板，最稳）。
  * ========================================================================== */
 (function () {
   "use strict";
   if (window.__DSX_MAIN__) return; // 幂等：整页刷新由 Java 侧重新注入
   window.__DSX_MAIN__ = true;
 
-  var VERSION = "v0.2";
+  var VERSION = "v0.3";
 
   /* ---------------- 小工具 ---------------- */
   function pad(n) { return String(n).padStart(2, "0"); }
@@ -30,16 +33,35 @@
     return e;
   }
   function fmtPos(v, min, max) { return Math.max(min, Math.min(max, v)); }
+  function fmtBytes(n) {
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + "MB";
+    if (n >= 1024) return (n / 1024).toFixed(1) + "KB";
+    return n + "B";
+  }
 
   /* ---------------- 状态与诊断 ---------------- */
-  var S = { log: [], busy: false, fmt: "html",
+  var S = { log: [], busy: false,
             counts: { api: 0, fail: 0, save: 0 }, token: null,
+            exports: [],   // 最近导出（App 内缓存）：[{name,len,content}]，最多 10 条
             lastMsg: "初始化…", lastLevel: "info" };
   var ui = {};
 
-  (function loadFmt() {
-    try { if (localStorage.getItem("dsx_fmt") === "txt") S.fmt = "txt"; } catch (_) {}
+  (function loadExports() {
+    try {
+      var raw = localStorage.getItem("dsx_exports");
+      if (!raw) return;
+      var arr = JSON.parse(raw);
+      if (Array.isArray(arr)) S.exports = arr.filter(function (x) { return x && x.name; }).slice(0, 10);
+    } catch (_) { S.exports = []; }
   })();
+
+  /** 持久化最近导出；localStorage 放不下就从旧到新逐条缩减，全放不下就只留内存。 */
+  function persistExports() {
+    for (var keep = S.exports.length; keep >= 0; keep--) {
+      try { localStorage.setItem("dsx_exports", JSON.stringify(S.exports.slice(0, keep))); return; }
+      catch (_) { /* 缩减后重试 */ }
+    }
+  }
 
   function diag(text, level) { // level: "info" | "ok" | "bad"
     S.lastMsg = text;
@@ -100,6 +122,32 @@
     return r;
   }
 
+  /** 复制全文：优先原生剪贴板桥（最稳），再退 navigator.clipboard / execCommand。 */
+  function copyText(text) {
+    var b = bridge();
+    if (b && b.copy) {
+      try { b.copy(text); return true; } catch (_) {}
+    }
+    if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(function () { legacyCopy(text); });
+      return true;
+    }
+    return legacyCopy(text);
+  }
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      var ok = document.execCommand("copy");
+      ta.remove();
+      return !!ok;
+    } catch (_) { return false; }
+  }
+
   /* ---------------- 接口（同源 fetch；包络规则见网页版已验证事实） ---------------- */
   function api(path) {
     var token = getToken();
@@ -141,7 +189,7 @@
     return null;
   }
 
-  /* ---------------- 导出当前对话 ---------------- */
+  /* ---------------- 导出当前对话（Markdown） ---------------- */
   function exportCurrent() {
     if (S.busy) { toastMsg("正在导出中，请稍候", true); return; }
     if (!bridge()) { diag("原生桥 DSExport 不可用（注入异常）", "bad"); return; }
@@ -163,16 +211,15 @@
         var s = DSExp.normalizeSession(cs, biz.chat_messages || []); // 沿 parent_id 裁剪到当前分支
         if (!s.id) s.id = where.id;
         if (!s.title || s.title === "(未命名会话)") s.title = "会话";
-        var content = S.fmt === "txt" ? DSExp.buildTxt(s) : DSExp.buildHtml(s);
+        var content = DSExp.buildMd(s);
         var name = "DeepSeek_" + DSExp.sanitizeFilename(s.title) + "_"
-                 + DSExp.stampForFilename() + "." + S.fmt;
-        diag("拉取成功：" + s.messages.length + " 条消息，正在保存 " + name);
-        var r = saveViaBridge(name,
-          S.fmt === "txt" ? "text/plain;charset=utf-8" : "text/html;charset=utf-8",
-          content);
+                 + DSExp.stampForFilename() + ".md";
+        diag("拉取成功：" + s.messages.length + " 条消息，生成 Markdown " + fmtBytes(content.length));
+        addExport(name, content); // 储存在 App 内：随取随复制
+        var r = saveViaBridge(name, "text/markdown;charset=utf-8", content);
         S.counts.save++;
-        diag("已保存 " + r.path + "（" + s.messages.length + " 条消息）", "ok");
-        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → 手机 Download 目录");
+        diag("已保存 " + r.path + "（「最近导出」可一键复制全文）", "ok");
+        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → Download 目录\n面板「最近导出」里可一键复制全文");
         try { bridge().toast("DS导出：已保存 " + r.name); } catch (_) {}
       })
       .catch(function (e) {
@@ -185,6 +232,57 @@
         S.busy = false;
         renderStatus();
       });
+  }
+
+  /* ---------------- 最近导出（App 内缓存） ---------------- */
+  function addExport(name, content) {
+    S.exports.unshift({ name: name, time: nowStr(), len: content.length, content: content });
+    if (S.exports.length > 10) S.exports.length = 10;
+    persistExports();
+    renderExports();
+  }
+
+  function renderExports() {
+    if (!ui.exportsList) return;
+    ui.exportsList.textContent = "";
+    if (!S.exports.length) {
+      ui.exportsList.appendChild(el("div",
+        "color:#6b7280;font-size:12px;padding:4px 0;",
+        "（暂无：点上面按钮导出后，这里可随时复制全文）"));
+      return;
+    }
+    S.exports.forEach(function (x) {
+      var row = el("div", "border:1px solid #1f2937;border-radius:10px;padding:8px 10px;margin:6px 0;");
+      var line = el("div", "display:flex;align-items:center;gap:10px;");
+      line.appendChild(el("span",
+        "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+        + "font-size:12.5px;color:#e5e7eb;",
+        "📄 " + x.name + " · " + fmtBytes(x.len)));
+      var copyBtn = el("a", LINK_CSS, "复制");
+      copyBtn.onclick = function () {
+        if (!x.content) { diag("该条过大未缓存全文，请到 Download 目录打开文件", "bad"); return; }
+        if (copyText(x.content)) {
+          diag("已复制 " + x.name + " 全文", "ok");
+          toastMsg("📋 已复制：" + x.name);
+        } else {
+          diag("复制失败，请用「查看」打开后长按选择复制", "bad");
+        }
+      };
+      line.appendChild(copyBtn);
+      var viewBtn = el("a", LINK_CSS, "查看");
+      line.appendChild(viewBtn);
+      row.appendChild(line);
+      var box = el("pre",
+        "display:none;margin:6px 0 0;background:#000;color:#a7f3d0;border-radius:8px;"
+        + "padding:8px 10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;"
+        + "font:11px/1.5 Menlo,Consolas,monospace;",
+        x.content || "（内容过大未缓存，请打开 Download 里的 .md 文件）");
+      row.appendChild(box);
+      viewBtn.onclick = function () {
+        box.style.display = box.style.display === "none" ? "block" : "none";
+      };
+      ui.exportsList.appendChild(row);
+    });
   }
 
   /* ---------------- 页内 toast（顶部居中，避开键盘与胶囊） ---------------- */
@@ -210,16 +308,18 @@
   }
 
   /* ---------------- 样式常量 ---------------- */
+  /* 胶囊：亮蓝底 + 白描边 + 光晕，加大加粗——更明显（v0.3 用户反馈） */
   var PILL_CSS =
       "position:fixed;z-index:2147483647;left:12px;right:auto;top:auto;"
-    + "bottom:calc(12px + env(safe-area-inset-bottom));"
-    + "background:rgba(17,24,39,.88);color:#fff;padding:9px 13px;border-radius:999px;"
-    + "font:600 12px/1 system-ui,-apple-system,'Segoe UI',sans-serif;"
-    + "box-shadow:0 4px 14px rgba(0,0,0,.45);cursor:pointer;user-select:none;"
-    + "-webkit-user-select:none;touch-action:none;white-space:nowrap;";
+    + "bottom:calc(14px + env(safe-area-inset-bottom));"
+    + "background:#2563eb;color:#fff;padding:13px 20px;border-radius:999px;"
+    + "font:700 15px/1 system-ui,-apple-system,'Segoe UI',sans-serif;letter-spacing:.5px;"
+    + "box-shadow:0 6px 24px rgba(37,99,235,.7),0 0 0 2px rgba(255,255,255,.4);"
+    + "cursor:pointer;user-select:none;-webkit-user-select:none;"
+    + "touch-action:none;white-space:nowrap;";
   var DOT_CSS =
-      "display:inline-block;width:8px;height:8px;border-radius:50%;"
-    + "background:#9ca3af;margin-left:7px;";
+      "display:inline-block;width:10px;height:10px;border-radius:50%;"
+    + "background:#9ca3af;border:2px solid #fff;margin-left:9px;";
   var SHEET_CSS =
       "position:fixed;z-index:2147483647;left:50%;transform:translateX(-50%);bottom:0;"
     + "width:min(94vw,560px);background:rgba(17,24,39,.95);color:#e5e7eb;"
@@ -267,13 +367,26 @@
 
     var row = el("div", "margin:10px 0 4px;");
     var exportBtn = el("button", BTN_CSS + "background:#2563eb;", "📤 导出当前对话");
-    var fmtBtn = el("button", BTN_CSS + "background:#374151;",
-      "格式:" + (S.fmt === "txt" ? "TXT" : "HTML"));
     var openBtn = el("button", BTN_CSS + "background:#374151;", "📂 下载目录");
     row.appendChild(exportBtn);
-    row.appendChild(fmtBtn);
     row.appendChild(openBtn);
     sheet.appendChild(row);
+
+    /* --- 最近导出（存于 App 内，可直接复制） --- */
+    var exHead = el("div", "margin-top:10px;font-size:12px;color:#9ca3af;");
+    exHead.appendChild(document.createTextNode("最近导出 · 存在 App 内，可直接复制"));
+    var clearBtn = el("a", LINK_CSS + "margin-left:10px;", "清空");
+    exHead.appendChild(clearBtn);
+    sheet.appendChild(exHead);
+    var exportsList = el("div", "");
+    sheet.appendChild(exportsList);
+    ui.exportsList = exportsList;
+    clearBtn.onclick = function () {
+      S.exports = [];
+      persistExports();
+      renderExports();
+      diag("已清空最近导出缓存");
+    };
 
     var foot = el("div", "margin-top:6px;font-size:11.5px;color:#9ca3af;");
     var logToggle = el("a", LINK_CSS + "margin-right:10px;", "诊断日志");
@@ -352,12 +465,6 @@
 
     /* 按钮行为 */
     exportBtn.onclick = exportCurrent;
-    fmtBtn.onclick = function () {
-      S.fmt = S.fmt === "html" ? "txt" : "html";
-      try { localStorage.setItem("dsx_fmt", S.fmt); } catch (_) {}
-      fmtBtn.textContent = "格式:" + (S.fmt === "txt" ? "TXT" : "HTML");
-      diag("导出格式切换为 " + S.fmt.toUpperCase());
-    };
     openBtn.onclick = function () {
       var b = bridge();
       if (!b) { diag("原生桥不可用，无法打开下载目录", "bad"); return; }
@@ -370,6 +477,7 @@
     };
 
     renderStatus();
+    renderExports();
   }
 
   /* ---------------- 启动 ---------------- */

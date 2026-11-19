@@ -174,7 +174,8 @@ public class MainActivity extends Activity {
         if (s.length() > 120) s = s.substring(0, 120);
         if (s.isEmpty()) s = "DeepSeek_export";
         boolean html = mime != null && mime.contains("html");
-        if (!s.toLowerCase().matches(".*\\.(html?|txt)$")) s += html ? ".html" : ".txt";
+        boolean md = mime != null && mime.contains("markdown");
+        if (!s.toLowerCase().matches(".*\\.(html?|txt|md)$")) s += html ? ".html" : md ? ".md" : ".txt";
         return s;
     }
 
@@ -184,7 +185,7 @@ public class MainActivity extends Activity {
     private class Bridge {
 
         @JavascriptInterface
-        public String version() { return "0.2"; }
+        public String version() { return "0.3"; }
 
         /**
          * 保存文本文件到公共 Download 目录（API 29+ 无需权限）。
@@ -259,6 +260,20 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void toast(String msg) {
             toastOnUiThread(msg == null ? "" : msg);
+        }
+
+        /** 复制文本到系统剪贴板（纯文本无需权限；API 29+ 系统自带粘贴提示）。 */
+        @JavascriptInterface
+        public void copy(String text) {
+            try {
+                android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("DeepSeek 导出",
+                        text == null ? "" : text));
+                toastOnUiThread("已复制到剪贴板");
+            } catch (Exception e) {
+                toastOnUiThread("复制失败：" + e.getMessage());
+            }
         }
     }
 }

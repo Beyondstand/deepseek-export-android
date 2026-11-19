@@ -212,6 +212,49 @@
     return L.join("\n");
   }
 
+  // ---------------- Markdown 导出（v0.3 起的默认导出格式） ----------------
+
+  /** MD 链接文本里的方括号安全化。 */
+  function mdText(t) {
+    return String(t == null ? "" : t).replace(/[\[\]]/g, "");
+  }
+
+  function buildMd(s) {
+    const L = [];
+    L.push("# DeepSeek 会话：" + (s.title || "(未命名会话)"));
+    L.push("");
+    L.push("> 导出时间 " + fmtDateTime(Math.floor(Date.now() / 1000))
+      + " · " + (s.messages ? s.messages.length : 0) + " 条消息"
+      + (s.model_type ? " · 模型 " + s.model_type : ""));
+    if (s.id) L.push("> 会话 ID " + s.id);
+    L.push("");
+    L.push("---");
+    L.push("");
+    for (const m of s.messages || []) {
+      L.push("## " + (m.role === "user" ? "👤 用户" : "🤖 DeepSeek")
+        + (m.inserted_at ? " · " + fmtDateTime(m.inserted_at) : ""));
+      L.push("");
+      if (m.thinking) {
+        L.push("> 💭 **思考过程**");
+        String(m.thinking).split("\n").forEach((l) => L.push(l === "" ? ">" : "> " + l));
+        L.push("");
+      }
+      for (const sr of m.searches || []) {
+        L.push("**🔍 联网搜索**：" + (sr.query || "未记录关键词"));
+        for (const r of sr.results || []) {
+          if (r.title || r.url) L.push("- [" + mdText(r.title || r.url) + "](" + (r.url || "") + ")");
+        }
+        L.push("");
+      }
+      L.push(m.content || "（空消息）");
+      L.push("");
+    }
+    L.push("---");
+    L.push("");
+    L.push("*由 DeepSeek 会话导出工具生成 · 非官方 · " + stampForFilename() + "*");
+    return L.join("\n");
+  }
+
   // ---------------- 单文件 HTML 导出 ----------------
 
   const HTML_CSS = `
@@ -263,6 +306,7 @@
     renderMessagesHtml,
     buildTxt,
     buildHtml,
+    buildMd,
     _extractMessage: extractMessage,
     _branchIds: branchIds,
   };

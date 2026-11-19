@@ -22,14 +22,15 @@ token 只在本机 WebView 内用于同源接口请求，不上传、不落盘�
 - 系统提示「未知来源 / 安装未知应用」时允许即可（debug 签名，仅自用）；
 - MIUI 等国产系统可能还要求开启「未知来源」并登录账号确认，属系统行为。
 
-## 使用（当前版本 v0.2）
+## 使用（当前版本 v0.3）
 
 1. 打开 App → 自动加载 chat.deepseek.com → 正常登录（登录即授权，本 App 不碰账号密码、不读官方 App）；
 2. 登录后胶囊圆点变绿；点进任意一个会话（地址变为 /a/…）；
-3. 轻点「⬇ DS导出」胶囊（长按可拖动到任意位置）展开面板；
-4. 「格式:HTML/TXT」选好格式 → 点「📤 导出当前对话」；
-5. 成功后页内 + 系统双弹确认，文件出现在手机「下载」目录：`DeepSeek_<标题>_<时间戳>.html/txt`；
-6. 「📂 下载目录」直接跳到系统下载界面。
+3. 轻点醒目的蓝色「⬇ DS导出」胶囊（长按可拖动）展开面板；
+4. 点「📤 导出当前对话」：
+   - **Markdown 文件** `DeepSeek_<标题>_<时间戳>.md` 存入手机「下载」目录（页内 + 系统双确认）；
+   - 全文同时存进 **App 内「最近导出」**（最多 10 条，localStorage 持久化、放不下自动缩减），点「复制」即得全文 Markdown，可直接粘贴到笔记/聊天；「查看」可就地展开；
+5. 「📂 下载目录」跳系统下载界面；「清空」释放 App 内缓存。
 
 诊断：状态行实时显示登录态与最近动作结果；底部徽章 API/已存/失败计数；「诊断日志」可展开——出问题时把内容照抄/截图反馈即可。
 
@@ -38,15 +39,16 @@ token 只在本机 WebView 内用于同源接口请求，不上传、不落盘�
 ## 路线图（小步提交，先真机验证再叠加）
 
 - [x] v0.1 工程骨架 + Actions 出 APK + 桥接链路自检
-- [x] v0.2 拉取接口，导出**当前对话**为 HTML/TXT（真机验证点①）
-- [ ] v0.3 全部会话列表 + 批量导出（页内弹层，逐个或全部）
-- [ ] v0.4 分享到其他应用 / 在线临时链接（读完即删）
+- [x] v0.2 拉取接口，导出**当前对话**（真机验证通过）
+- [x] v0.3 只导出 Markdown；全文存 App 内一键复制；胶囊按钮更醒目
+- [ ] v0.4 全部会话列表 + 批量导出（页内弹层，逐个或全部）
+- [ ] v0.5 分享到其他应用 / 在线临时链接（读完即删 Worker）
 
 ## 常见问题
 
 - **点导出提示 INVALID_TOKEN / 未登录**：在 App 内的 DeepSeek 页面退出重登一次，再回到会话页导出。
 - **Download 里找不到文件**：用面板上的「📂 打开下载目录」，或用文件管理器进入内部存储 Download 目录。
-- **导出内容**：HTML 里思考过程折叠展示、联网搜索保留标题+链接；TXT 为纯文本同结构。
+- **导出内容**：Markdown；思考过程为引用块、联网搜索保留「[标题](链接)」。
 
 ## 免责
 
@@ -55,7 +57,7 @@ token 只在本机 WebView 内用于同源接口请求，不上传、不落盘�
 ## 开发
 
 - 单 Activity + WebView，Java，零第三方依赖，minSdk 29 / targetSdk 34；
-- `app/src/main/assets/dsx_core.js`：归一化/分支裁剪/HTML/TXT 渲染纯函数（与网页版工具共用同源代码），`node tests/dsx_core.test.mjs` 可单测；
-- `app/src/main/assets/dsx_main.js`：注入后的悬浮面板 UI 与原生桥（`window.DSExport`）胶水逻辑；
-- `MainActivity.java`：WebView 容器 + `saveFile`（MediaStore.Downloads）/`openDownloads`/`toast` 桥；
+- `app/src/main/assets/dsx_core.js`：归一化/分支裁剪/Markdown 渲染纯函数（与网页版工具同源），`node tests/dsx_core.test.mjs` 可单测；
+- `app/src/main/assets/dsx_main.js`：注入后的悬浮面板、最近导出缓存与原生桥（`window.DSExport`）胶水逻辑，`node tests/dsx_main.smoke.test.mjs` 冒烟；
+- `MainActivity.java`：WebView 容器 + 桥：`saveFile`（MediaStore.Downloads）/`copy`（系统剪贴板）/`openDownloads`/`toast`；
 - 修改后 push 即触发 Actions 出新 APK。

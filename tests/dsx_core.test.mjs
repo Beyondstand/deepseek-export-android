@@ -63,4 +63,15 @@ assert.ok(html.includes("<style>"));
 assert.ok(html.includes("msg user") && html.includes("msg ai"));
 assert.ok(html.includes("DeepSeek 对话导出"));
 
+// ---------------- Markdown 导出 ----------------
+const md = DSExp.buildMd(s);
+assert.ok(md.startsWith("# DeepSeek 会话：测试会话"));
+assert.ok(md.includes("## 👤 用户") && md.includes("## 🤖 DeepSeek"));
+assert.ok(md.includes("> 💭 **思考过程**") && md.includes("> 当前思考"));
+assert.ok(md.includes("**🔍 联网搜索**：q"));
+assert.ok(md.includes("- [t](u)"));
+assert.ok(md.includes("最终回答"));
+assert.ok(!md.includes("被重新生成的旧回答"), "MD 不含被裁分支");
+assert.ok(md.includes("由 DeepSeek 会话导出工具生成 · 非官方"));
+
 console.log("✅ dsx_core.js 全部测试通过");

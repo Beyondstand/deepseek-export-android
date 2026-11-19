@@ -1,5 +1,5 @@
-/* dsx_main.js 冒烟测试：vm 里搭最小 DOM/原生桥/接口桩，
- * 跑通 boot → 导出当前对话(HTML) → 格式切换(TXT) → INVALID_TOKEN 分支。
+/* dsx_main.js 冒烟测试（v0.3）：vm 里搭最小 DOM/原生桥/接口桩，
+ * 跑通 boot → 导出 Markdown → App 内缓存一键复制 → 查看展开 → INVALID_TOKEN 分支。
  * 运行：node tests/dsx_main.smoke.test.mjs */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -18,10 +18,26 @@ class FakeElement {
   constructor(tag) {
     this.tagName = tag.toUpperCase();
     this.children = [];
-    this.style = {};
     this.textContent = "";
     this.parentNode = null;
     this.handlers = {};
+    // 模拟真实 DOM：cssText 赋值会把 k:v; 声明解析成 style 上的 camelCase 属性
+    const styleObj = {};
+    Object.defineProperty(styleObj, "cssText", {
+      set(v) {
+        for (const k of Object.keys(this)) delete this[k];
+        String(v).split(";").forEach((d) => {
+          const i = d.indexOf(":");
+          if (i > 0) {
+            const key = d.slice(0, i).trim().replace(/-([a-z])/g, (m, c) => c.toUpperCase());
+            this[key] = d.slice(i + 1).trim();
+          }
+        });
+        this._cssText = String(v);
+      },
+      get() { return this._cssText || ""; },
+    });
+    this.style = styleObj;
   }
   appendChild(child) { child.parentNode = this; this.children.push(child); return child; }
   remove() {
@@ -33,8 +49,8 @@ class FakeElement {
   addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); }
   setPointerCapture() {}
   getBoundingClientRect() { return { left: 0, top: 0 }; }
-  get offsetWidth() { return 40; }
-  get offsetHeight() { return 20; }
+  get offsetWidth() { return 60; }
+  get offsetHeight() { return 24; }
 }
 const allElements = [];
 function findId(rootEl, id) {
@@ -62,14 +78,16 @@ const localStorage = {
 
 /* ---------------- 原生桥桩 ---------------- */
 const saves = [];
+const copies = [];
 const DSExport = {
-  version: () => "0.2-test",
+  version: () => "0.3-test",
   saveFile(name, mime, content) {
     saves.push({ name, mime, content });
     return JSON.stringify({ ok: true, name, path: "Download/" + name, size: content.length });
   },
   openDownloads() {},
   toast() {},
+  copy(text) { copies.push(text); },
 };
 
 /* ---------------- 接口桩（与已验证的包络一致） ---------------- */
@@ -121,46 +139,76 @@ vm.runInContext(
 );
 
 const exportBtn = () => allElements.find((e) => e.textContent === "📤 导出当前对话");
+const btnByText = (t) => allElements.find((e) => e.textContent === t);
 
 /* ---------------- 断言 ---------------- */
 await sleep(120); // boot + 首帧
 
 assert.ok(document.getElementById("dsx-pill"), "悬浮胶囊已注入");
+const pill = document.getElementById("dsx-pill");
+assert.ok(pill.style.cssText.includes("#2563eb"), "胶囊为亮蓝底（更醒目）");
+assert.ok(pill.style.cssText.includes("font:700 15px"), "胶囊字体加大加粗");
 assert.ok(document.getElementById("dsx-sheet"), "底部面板已注入");
 assert.ok(exportBtn(), "「导出当前对话」按钮存在");
+assert.ok(!allElements.some((e) => typeof e.textContent === "string" && /^格式:/.test(e.textContent)),
+  "格式切换按钮已移除（仅 Markdown）");
 
-// 1) HTML 导出
+// 1) 导出 → Markdown 文件 + App 内缓存
 exportBtn().onclick();
 await sleep(200);
 assert.equal(fetchCalls, 1, "发起 1 次接口请求");
 assert.equal(saves.length, 1, "经原生桥保存 1 个文件");
-assert.match(saves[0].name, /^DeepSeek_测试会话_\d{8}-\d{6}\.html$/, "文件名 = 前缀+标题+时间戳.html");
-assert.ok(saves[0].content.startsWith("<!doctype html>"), "HTML 文档头");
+assert.match(saves[0].name, /^DeepSeek_测试会话_\d{8}-\d{6}\.md$/, "文件名 = 前缀+标题+时间戳.md");
+assert.ok(saves[0].mime.includes("markdown"), "MIME 为 markdown");
+assert.ok(saves[0].content.startsWith("# DeepSeek 会话：测试会话"), "MD 文档头");
 assert.ok(saves[0].content.includes("最终回答"), "包含当前分支内容");
-assert.ok(!saves[0].content.includes("被重新生成的旧回答"), "HTML 不含被裁剪的旧分支");
+assert.ok(saves[0].content.includes("> 💭 **思考过程**"), "思考过程为引用块");
+assert.ok(!saves[0].content.includes("被重新生成的旧回答"), "MD 不含被裁剪的旧分支");
 let toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl && toastEl.textContent.includes("已导出"), "页内确认 toast");
+assert.ok(allElements.some((e) => e.textContent === "API 1 · 已存 1 · 失败 0"), "计数徽章更新");
 
-// 2) 格式切换 → TXT 导出
-const fmtBtn = allElements.find((e) => e.textContent === "格式:HTML");
-assert.ok(fmtBtn, "格式按钮存在");
-fmtBtn.onclick();
-assert.equal(fmtBtn.textContent, "格式:TXT", "按钮文案切换");
-assert.equal(store.get("dsx_fmt"), "txt", "格式记忆到 localStorage");
-exportBtn().onclick();
-await sleep(200);
-assert.equal(saves.length, 2);
-assert.match(saves[1].name, /^DeepSeek_测试会话_\d{8}-\d{6}\.txt$/);
-assert.ok(saves[1].content.startsWith("DeepSeek 会话记录"), "TXT 文件头");
-assert.ok(saves[1].content.includes("（思考过程）") && saves[1].content.includes("当前思考"));
+// 2) App 内缓存 → 一键复制（走原生剪贴板桥）
+const cached = JSON.parse(store.get("dsx_exports"));
+assert.equal(cached.length, 1, "导出全文已持久化到 App 内");
+assert.equal(cached[0].name, saves[0].name);
+const copyBtn = btnByText("复制");
+assert.ok(copyBtn, "最近导出有「复制」按钮");
+copyBtn.onclick();
+assert.equal(copies.length, 1, "调用原生剪贴板桥");
+assert.equal(copies[0], saves[0].content, "复制的是全文 Markdown");
+toastEl = document.getElementById("dsx-toast");
+assert.ok(toastEl.textContent.includes("已复制"), "复制确认 toast");
 
-// 3) INVALID_TOKEN → 明确提示重新登录，不落文件
+// 3) 「查看」就地展开全文
+const viewBtn = btnByText("查看");
+assert.ok(viewBtn, "最近导出有「查看」按钮");
+viewBtn.onclick();
+const contentBox = viewBtn.parentNode.parentNode.children[1];
+assert.equal(contentBox.style.display, "block", "查看展开内容");
+assert.equal(contentBox.textContent, saves[0].content, "展开内容为全文");
+
+// 4) INVALID_TOKEN → 明确提示重新登录，不落文件不进缓存
 box.envelope = { code: 40003, msg: "INVALID_TOKEN", data: { biz_code: 40003, biz_data: null } };
 exportBtn().onclick();
 await sleep(200);
-assert.equal(saves.length, 2, "失败时不产生新文件");
+assert.equal(saves.length, 1, "失败时不产生新文件");
+assert.equal(JSON.parse(store.get("dsx_exports")).length, 1, "失败时不新增缓存");
 toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl.textContent.includes("登录已失效"), "INVALID_TOKEN 有明确提示");
 
-console.log("✅ dsx_main.js 冒烟测试通过（注入/导出/双格式/无效token 分支）");
+// 5) 再导一次（成功）→ 文件与缓存各 +1
+box.envelope = {
+  code: 0, msg: "",
+  data: { biz_code: 0, biz_data: { chat_session: { id: "smoke-1", title: "测试会话", current_message_id: 5 }, chat_messages: MSGS } },
+};
+exportBtn().onclick();
+await sleep(200);
+assert.equal(saves.length, 2);
+const cached2 = JSON.parse(store.get("dsx_exports"));
+assert.equal(cached2.length, 2, "缓存 2 条");
+assert.equal(cached2[0].name, saves[1].name, "最新在前");
+assert.ok(allElements.some((e) => e.textContent === "API 3 · 已存 2 · 失败 1"), "最终计数徽章");
+
+console.log("✅ dsx_main.js 冒烟测试通过（注入/MD导出/一键复制/查看/无效token 分支）");
 process.exit(0);
