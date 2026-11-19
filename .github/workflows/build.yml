@@ -22,8 +22,10 @@ jobs:
       - name: Gradle 环境与缓存
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 核心纯函数测试（node）
-        run: node tests/dsx_core.test.mjs
+      - name: 核心纯函数 + 注入脚本冒烟测试（node）
+        run: |
+          node tests/dsx_core.test.mjs
+          node tests/dsx_main.smoke.test.mjs
 
       - name: 构建 Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
