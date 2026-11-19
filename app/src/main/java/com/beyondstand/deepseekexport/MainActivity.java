@@ -184,7 +184,7 @@ public class MainActivity extends Activity {
     private class Bridge {
 
         @JavascriptInterface
-        public String version() { return "0.1"; }
+        public String version() { return "0.2"; }
 
         /**
          * 保存文本文件到公共 Download 目录（API 29+ 无需权限）。
