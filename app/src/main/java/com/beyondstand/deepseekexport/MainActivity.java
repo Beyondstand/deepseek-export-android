@@ -185,7 +185,7 @@ public class MainActivity extends Activity {
     private class Bridge {
 
         @JavascriptInterface
-        public String version() { return "0.4"; }
+        public String version() { return "0.5"; }
 
         /**
          * 保存文本文件到公共 Download 目录（API 29+ 无需权限）。
@@ -277,20 +277,25 @@ public class MainActivity extends Activity {
         }
 
         /**
-         * 调起系统分享面板，把文本交给用户选择的 AI 客户端
-         * （通义/夸克浏览器等，凡注册接收纯文本分享的应用都会出现在面板里）。
+         * 直接唤起指定应用接收文本（v0.5：导出后的「夸克/通义千问」按钮用）。
+         * 应用未安装或未注册接收分享时，自动退回系统分享面板，内容不丢。
          */
         @JavascriptInterface
-        public void shareText(String text) {
+        public void shareTextTo(String pkg, String text) {
             runOnUiThread(() -> {
+                Intent base = new Intent(Intent.ACTION_SEND);
+                base.setType("text/plain");
+                base.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
+                base.putExtra(Intent.EXTRA_TITLE, "DeepSeek 对话 · 接手提示词+全文");
                 try {
-                    Intent it = new Intent(Intent.ACTION_SEND);
-                    it.setType("text/plain");
-                    it.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
-                    it.putExtra(Intent.EXTRA_TITLE, "DeepSeek 对话 · 接手提示词+全文");
-                    startActivity(Intent.createChooser(it, "把对话发给哪个 AI？"));
+                    startActivity(new Intent(base).setPackage(pkg)); // 直接唤起指定应用
                 } catch (Exception e) {
-                    toastOnUiThread("调起分享面板失败：" + e.getMessage());
+                    try {
+                        startActivity(Intent.createChooser(base, "把对话发给哪个应用？"));
+                        toastOnUiThread("未找到 " + pkg + "，已打开系统分享面板");
+                    } catch (Exception e2) {
+                        toastOnUiThread("调起分享失败：" + e2.getMessage());
+                    }
                 }
             });
         }

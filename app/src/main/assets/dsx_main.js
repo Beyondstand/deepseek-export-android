@@ -2,8 +2,9 @@
  * dsx_main.js v0.4 — 「DeepSeek 会话导出」App 注入脚本。
  * 由 MainActivity 在 chat.deepseek.com 页面加载完成后注入（幂等）。
  *
- * v0.4 新增：一键把「接手提示词 + 完整对话(MD)」经系统分享面板发给
- * 千问客户端（通义）/ 夸克浏览器等任意 AI，新助手直接继承原对话上下文。
+ * v0.4：把「接手提示词 + 完整对话(MD)」分享给千问/夸克，继承原对话上下文。
+ * v0.5 变化：导出成功后面板出现「夸克浏览器 / 通义千问」两个按钮，
+ * 点选直接唤起对应应用（未安装则自动退回系统分享面板，内容不丢）。
  *
  * v0.3 变化（真机验证 v0.2 后的用户反馈）：
  *   - 导出只存 Markdown（.md），不再出 HTML/TXT 文件；
@@ -21,7 +22,7 @@
   if (window.__DSX_MAIN__) return; // 幂等：整页刷新由 Java 侧重新注入
   window.__DSX_MAIN__ = true;
 
-  var VERSION = "v0.4";
+  var VERSION = "v0.5";
 
   /* ---------------- 小工具 ---------------- */
   function pad(n) { return String(n).padStart(2, "0"); }
@@ -46,6 +47,7 @@
   var S = { log: [], busy: false,
             counts: { api: 0, fail: 0, save: 0 }, token: null,
             exports: [],   // 最近导出（App 内缓存）：[{name,len,content}]，最多 10 条
+            lastExport: null, // 最近一次导出（内存），供「导出后两个 AI 按钮」直接发送
             lastMsg: "初始化…", lastLevel: "info" };
   var ui = {};
 
@@ -219,10 +221,12 @@
                  + DSExp.stampForFilename() + ".md";
         diag("拉取成功：" + s.messages.length + " 条消息，生成 Markdown " + fmtBytes(content.length));
         addExport(name, content); // 储存在 App 内：随取随复制
+        S.lastExport = { name: name, content: content };
+        showFeedStrip();
         var r = saveViaBridge(name, "text/markdown;charset=utf-8", content);
         S.counts.save++;
         diag("已保存 " + r.path + "（「最近导出」可一键复制全文）", "ok");
-        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → Download 目录\n面板「最近导出」里可一键复制全文");
+        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → Download 目录\n点下方「夸克 / 通义千问」直接接着聊");
         try { bridge().toast("DS导出：已保存 " + r.name); } catch (_) {}
       })
       .catch(function (e) {
@@ -237,9 +241,9 @@
       });
   }
 
-  /* ---------------- 发给千问 / 其他 AI 客户端 ---------------- */
+  /* ---------------- 发给千问 / 夸克：直接唤起指定 AI 客户端 ---------------- */
 
-  /* 接手提示词：让千问把下面的记录当作自己的对话记忆并继续服务。
+  /* 接手提示词：让目标 AI 把下面的记录当作自己的对话记忆并继续服务。
    * 已替用户写好；想自定义就改这里（导出正文会接在提示词后面）。 */
   var QIANWEN_PROMPT = [
     "我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。",
@@ -258,56 +262,44 @@
     "",
   ].join("\n");
 
-  /** 组装并经原生桥调起系统分享面板（通义 / 夸克 / 任意接收文本的 AI 客户端）。 */
-  function feedQianwenWith(md, label) {
+  /* 直达目标（v0.5）：导出后出现两个按钮，点选直接唤起对应应用；
+   * 未安装/未注册接收分享时，原生侧自动退回系统分享面板，内容不丢。 */
+  var AI_TARGETS = [
+    { label: "🌐 夸克浏览器", pkg: "com.quark.browser" },
+    { label: "🤖 通义千问", pkg: "com.aliyun.tongyi" },
+  ];
+
+  function feedTo(pkg, appName, md, label) {
     var b = bridge();
-    if (!b || !b.shareText) { diag("原生桥不支持分享（请确认 App 已更新到 0.4+）", "bad"); return; }
+    if (!b || !b.shareTextTo) { diag("原生桥不支持定向分享（请确认 App 已更新到 0.5+）", "bad"); return; }
     var text = QIANWEN_PROMPT + "\n" + md;
-    diag("正在调起系统分享面板（" + fmtBytes(text.length) + "）：" + label);
+    diag("唤起 " + appName + "（" + fmtBytes(text.length) + "）：" + label);
     try {
-      b.shareText(text);
-      diag("已交给系统分享面板，请选择 通义 / 夸克", "ok");
-      toastMsg("🤖 在分享面板选择「通义」或「夸克」：\n接手提示词 + 完整对话已带上，发送即可继续聊");
+      b.shareTextTo(pkg, text);
+      diag("已请求唤起 " + appName, "ok");
+      toastMsg("🚀 正在唤起 " + appName + "：\n提示词 + 完整对话已带上，发送即可继续聊");
     } catch (e) {
-      diag("分享失败：" + ((e && e.message) || e), "bad");
-      toastMsg("⚠ 分享失败：" + ((e && e.message) || e), true);
+      diag("唤起失败：" + ((e && e.message) || e), "bad");
+      toastMsg("⚠ 唤起失败：" + ((e && e.message) || e), true);
     }
   }
 
-  /** 当前对话 → 接手提示词 + MD → 分享给千问等 AI 客户端。 */
-  function feedQianwenCurrent() {
-    if (S.busy) { toastMsg("正在处理中，请稍候", true); return; }
-    if (!bridge()) { diag("原生桥 DSExport 不可用（注入异常）", "bad"); return; }
-    if (!window.DSExp) { diag("核心 DSExp 未加载，无法生成对话文本", "bad"); return; }
-    var where = currentSessionId();
-    if (!where) {
-      diag("当前页面不是对话页（地址需为 /a/…）：请先打开一个会话", "bad");
-      toastMsg("⚠ 请先打开一个会话再「发给千问」", true);
+  /** 「导出后」按钮：发送最近一次导出的全文（不重复拉接口）。 */
+  function feedLast(t) {
+    if (!S.lastExport || !S.lastExport.content) {
+      diag("还没有刚导出的内容：先点「导出当前对话」", "bad");
+      toastMsg("⚠ 先导出一次，再选 AI 接着聊", true);
       return;
     }
-    S.busy = true;
-    renderStatus();
-    diag("拉取当前对话，准备喂给千问（" + where.how + " 匹配 ID …" + where.id.slice(-6) + "）");
-    api("/api/v0/chat/history_messages?chat_session_id=" + encodeURIComponent(where.id)
-        + "&cache_version=0")
-      .then(function (biz) {
-        var cs = biz.chat_session || {};
-        var s = DSExp.normalizeSession(cs, biz.chat_messages || []);
-        if (!s.id) s.id = where.id;
-        if (!s.title || s.title === "(未命名会话)") s.title = "会话";
-        var md = DSExp.buildMd(s);
-        feedQianwenWith(md, s.title + "（" + s.messages.length + " 条消息）");
-      })
-      .catch(function (e) {
-        S.counts.fail++;
-        var msg = (e && e.message) || String(e);
-        diag("拉取失败：" + msg, "bad");
-        toastMsg("⚠ 拉取失败：" + msg, true);
-      })
-      .then(function () {
-        S.busy = false;
-        renderStatus();
-      });
+    feedTo(t.pkg, t.label, S.lastExport.content, S.lastExport.name);
+  }
+
+  /** 导出成功后显示（或更新）「选个 AI 接着聊」按钮条。 */
+  function showFeedStrip() {
+    if (!ui.feedStrip) return;
+    if (ui.feedStripTxt && S.lastExport)
+      ui.feedStripTxt.textContent = "刚导出：" + S.lastExport.name + " → 选个 AI 接着聊";
+    ui.feedStrip.style.display = "block";
   }
 
   /* ---------------- 最近导出（App 内缓存） ---------------- */
@@ -345,12 +337,18 @@
         }
       };
       line.appendChild(copyBtn);
-      var feedLink = el("a", LINK_CSS, "千问");
-      feedLink.onclick = function () {
+      var ftQuark = el("a", LINK_CSS, "夸克");
+      ftQuark.onclick = function () {
         if (!x.content) { diag("该条过大未缓存全文，请先重新导出当前对话", "bad"); return; }
-        feedQianwenWith(x.content, x.name);
+        feedTo("com.quark.browser", "夸克浏览器", x.content, x.name);
       };
-      line.appendChild(feedLink);
+      line.appendChild(ftQuark);
+      var ftTongyi = el("a", LINK_CSS, "千问");
+      ftTongyi.onclick = function () {
+        if (!x.content) { diag("该条过大未缓存全文，请先重新导出当前对话", "bad"); return; }
+        feedTo("com.aliyun.tongyi", "通义千问", x.content, x.name);
+      };
+      line.appendChild(ftTongyi);
       var viewBtn = el("a", LINK_CSS, "查看");
       line.appendChild(viewBtn);
       row.appendChild(line);
@@ -449,12 +447,25 @@
 
     var row = el("div", "margin:10px 0 4px;");
     var exportBtn = el("button", BTN_CSS + "background:#2563eb;", "📤 导出当前对话");
-    var feedBtn = el("button", BTN_CSS + "background:#7c3aed;", "🤖 发给千问");
     var openBtn = el("button", BTN_CSS + "background:#374151;", "📂 下载目录");
     row.appendChild(exportBtn);
-    row.appendChild(feedBtn);
     row.appendChild(openBtn);
     sheet.appendChild(row);
+
+    /* --- 导出后：两个按钮直接唤起指定 AI 客户端 --- */
+    var feedStrip = el("div", "display:none;border:1px dashed #374151;border-radius:10px;padding:8px 10px;margin:10px 0 2px;");
+    var stripTxt = el("div", "font-size:12px;color:#93c5fd;margin-bottom:6px;", "刚导出的对话 → 选个 AI 接着聊");
+    feedStrip.appendChild(stripTxt);
+    var feedRow = el("div", "");
+    AI_TARGETS.forEach(function (t) {
+      var b = el("button", BTN_CSS + "background:#7c3aed;", t.label);
+      b.onclick = function () { feedLast(t); };
+      feedRow.appendChild(b);
+    });
+    feedStrip.appendChild(feedRow);
+    sheet.appendChild(feedStrip);
+    ui.feedStrip = feedStrip;
+    ui.feedStripTxt = stripTxt;
 
     /* --- 最近导出（存于 App 内，可直接复制） --- */
     var exHead = el("div", "margin-top:10px;font-size:12px;color:#9ca3af;");
@@ -549,7 +560,6 @@
 
     /* 按钮行为 */
     exportBtn.onclick = exportCurrent;
-    feedBtn.onclick = feedQianwenCurrent;
     openBtn.onclick = function () {
       var b = bridge();
       if (!b) { diag("原生桥不可用，无法打开下载目录", "bad"); return; }
@@ -576,6 +586,10 @@
       + "，原生桥 " + (bridge() ? "就绪" : "不可用") + "）",
       bridge() ? "ok" : "bad");
     tokenLoop();
+    if (S.exports.length && S.exports[0].content) { // 有历史导出：恢复「接着聊」按钮条
+      S.lastExport = { name: S.exports[0].name, content: S.exports[0].content };
+      showFeedStrip();
+    }
     setInterval(function () { // 看门狗：SPA 移除了节点就重建，保证胶囊常驻
       if (!document.getElementById("dsx-pill")) {
         buildUi();
