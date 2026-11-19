@@ -1,0 +1,4 @@
+// 顶层构建文件：只声明 Android Gradle 插件版本（AGP 8.4.2 / Gradle 8.7 / JDK17）。
+plugins {
+    id 'com.android.application' version '8.4.2' apply false
+}
