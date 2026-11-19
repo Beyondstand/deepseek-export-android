@@ -1,6 +1,9 @@
 /* ============================================================================
- * dsx_main.js v0.3 — 「DeepSeek 会话导出」App 注入脚本。
+ * dsx_main.js v0.4 — 「DeepSeek 会话导出」App 注入脚本。
  * 由 MainActivity 在 chat.deepseek.com 页面加载完成后注入（幂等）。
+ *
+ * v0.4 新增：一键把「接手提示词 + 完整对话(MD)」经系统分享面板发给
+ * 千问客户端（通义）/ 夸克浏览器等任意 AI，新助手直接继承原对话上下文。
  *
  * v0.3 变化（真机验证 v0.2 后的用户反馈）：
  *   - 导出只存 Markdown（.md），不再出 HTML/TXT 文件；
@@ -18,7 +21,7 @@
   if (window.__DSX_MAIN__) return; // 幂等：整页刷新由 Java 侧重新注入
   window.__DSX_MAIN__ = true;
 
-  var VERSION = "v0.3";
+  var VERSION = "v0.4";
 
   /* ---------------- 小工具 ---------------- */
   function pad(n) { return String(n).padStart(2, "0"); }
@@ -234,6 +237,79 @@
       });
   }
 
+  /* ---------------- 发给千问 / 其他 AI 客户端 ---------------- */
+
+  /* 接手提示词：让千问把下面的记录当作自己的对话记忆并继续服务。
+   * 已替用户写好；想自定义就改这里（导出正文会接在提示词后面）。 */
+  var QIANWEN_PROMPT = [
+    "我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。",
+    "下面是完整的对话记录（Markdown 格式），请通读后：",
+    "",
+    "1. 把它当作你自己的对话记忆：延续已有话题、目标和进度，从我停止的地方继续当我的助手；",
+    "2. 记住对话中我的背景、偏好和约束，后续回答保持一致，不要让我重复已知信息；",
+    "3. 如果对话结尾我的问题还没解决，请直接接着解决并给出结果；",
+    "4. 引用对话内容时忠实原文，不要编造我没说过的话；",
+    "5. 之后请沿用对话中的语言和风格回答。",
+    "",
+    "记录中「👤 用户」是我，「🤖 DeepSeek」是原助手；「💭 思考过程」「🔍 联网搜索」是原助手的辅助内容，可作背景参考。",
+    "",
+    "---",
+    "（以下为完整对话记录）",
+    "",
+  ].join("\n");
+
+  /** 组装并经原生桥调起系统分享面板（通义 / 夸克 / 任意接收文本的 AI 客户端）。 */
+  function feedQianwenWith(md, label) {
+    var b = bridge();
+    if (!b || !b.shareText) { diag("原生桥不支持分享（请确认 App 已更新到 0.4+）", "bad"); return; }
+    var text = QIANWEN_PROMPT + "\n" + md;
+    diag("正在调起系统分享面板（" + fmtBytes(text.length) + "）：" + label);
+    try {
+      b.shareText(text);
+      diag("已交给系统分享面板，请选择 通义 / 夸克", "ok");
+      toastMsg("🤖 在分享面板选择「通义」或「夸克」：\n接手提示词 + 完整对话已带上，发送即可继续聊");
+    } catch (e) {
+      diag("分享失败：" + ((e && e.message) || e), "bad");
+      toastMsg("⚠ 分享失败：" + ((e && e.message) || e), true);
+    }
+  }
+
+  /** 当前对话 → 接手提示词 + MD → 分享给千问等 AI 客户端。 */
+  function feedQianwenCurrent() {
+    if (S.busy) { toastMsg("正在处理中，请稍候", true); return; }
+    if (!bridge()) { diag("原生桥 DSExport 不可用（注入异常）", "bad"); return; }
+    if (!window.DSExp) { diag("核心 DSExp 未加载，无法生成对话文本", "bad"); return; }
+    var where = currentSessionId();
+    if (!where) {
+      diag("当前页面不是对话页（地址需为 /a/…）：请先打开一个会话", "bad");
+      toastMsg("⚠ 请先打开一个会话再「发给千问」", true);
+      return;
+    }
+    S.busy = true;
+    renderStatus();
+    diag("拉取当前对话，准备喂给千问（" + where.how + " 匹配 ID …" + where.id.slice(-6) + "）");
+    api("/api/v0/chat/history_messages?chat_session_id=" + encodeURIComponent(where.id)
+        + "&cache_version=0")
+      .then(function (biz) {
+        var cs = biz.chat_session || {};
+        var s = DSExp.normalizeSession(cs, biz.chat_messages || []);
+        if (!s.id) s.id = where.id;
+        if (!s.title || s.title === "(未命名会话)") s.title = "会话";
+        var md = DSExp.buildMd(s);
+        feedQianwenWith(md, s.title + "（" + s.messages.length + " 条消息）");
+      })
+      .catch(function (e) {
+        S.counts.fail++;
+        var msg = (e && e.message) || String(e);
+        diag("拉取失败：" + msg, "bad");
+        toastMsg("⚠ 拉取失败：" + msg, true);
+      })
+      .then(function () {
+        S.busy = false;
+        renderStatus();
+      });
+  }
+
   /* ---------------- 最近导出（App 内缓存） ---------------- */
   function addExport(name, content) {
     S.exports.unshift({ name: name, time: nowStr(), len: content.length, content: content });
@@ -269,6 +345,12 @@
         }
       };
       line.appendChild(copyBtn);
+      var feedLink = el("a", LINK_CSS, "千问");
+      feedLink.onclick = function () {
+        if (!x.content) { diag("该条过大未缓存全文，请先重新导出当前对话", "bad"); return; }
+        feedQianwenWith(x.content, x.name);
+      };
+      line.appendChild(feedLink);
       var viewBtn = el("a", LINK_CSS, "查看");
       line.appendChild(viewBtn);
       row.appendChild(line);
@@ -367,8 +449,10 @@
 
     var row = el("div", "margin:10px 0 4px;");
     var exportBtn = el("button", BTN_CSS + "background:#2563eb;", "📤 导出当前对话");
+    var feedBtn = el("button", BTN_CSS + "background:#7c3aed;", "🤖 发给千问");
     var openBtn = el("button", BTN_CSS + "background:#374151;", "📂 下载目录");
     row.appendChild(exportBtn);
+    row.appendChild(feedBtn);
     row.appendChild(openBtn);
     sheet.appendChild(row);
 
@@ -465,6 +549,7 @@
 
     /* 按钮行为 */
     exportBtn.onclick = exportCurrent;
+    feedBtn.onclick = feedQianwenCurrent;
     openBtn.onclick = function () {
       var b = bridge();
       if (!b) { diag("原生桥不可用，无法打开下载目录", "bad"); return; }

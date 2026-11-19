@@ -185,7 +185,7 @@ public class MainActivity extends Activity {
     private class Bridge {
 
         @JavascriptInterface
-        public String version() { return "0.3"; }
+        public String version() { return "0.4"; }
 
         /**
          * 保存文本文件到公共 Download 目录（API 29+ 无需权限）。
@@ -274,6 +274,25 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 toastOnUiThread("复制失败：" + e.getMessage());
             }
+        }
+
+        /**
+         * 调起系统分享面板，把文本交给用户选择的 AI 客户端
+         * （通义/夸克浏览器等，凡注册接收纯文本分享的应用都会出现在面板里）。
+         */
+        @JavascriptInterface
+        public void shareText(String text) {
+            runOnUiThread(() -> {
+                try {
+                    Intent it = new Intent(Intent.ACTION_SEND);
+                    it.setType("text/plain");
+                    it.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
+                    it.putExtra(Intent.EXTRA_TITLE, "DeepSeek 对话 · 接手提示词+全文");
+                    startActivity(Intent.createChooser(it, "把对话发给哪个 AI？"));
+                } catch (Exception e) {
+                    toastOnUiThread("调起分享面板失败：" + e.getMessage());
+                }
+            });
         }
     }
 }
