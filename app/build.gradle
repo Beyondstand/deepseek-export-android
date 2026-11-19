@@ -6,6 +6,17 @@ android {
     namespace 'com.beyondstand.deepseekexport'
     compileSdk 34
 
+    signingConfigs {
+        debug {
+            // 固定 debug 签名密钥（随仓库提交）：每次 CI 产出的 APK 同签名，
+            // 新版本可直接覆盖安装升级，无需卸载重装、无需重新登录 DeepSeek。
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     defaultConfig {
         applicationId "com.beyondstand.deepseekexport"
         minSdk 29          // MediaStore.Downloads 无需权限的起点
