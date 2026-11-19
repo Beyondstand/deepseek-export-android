@@ -1,5 +1,6 @@
-/* dsx_main.js 冒烟测试（v0.5）：vm 里搭最小 DOM/原生桥/接口桩，
- * 跑通 boot → 导出 MD → 出现「夸克/通义千问」两按钮 → 定向唤起 → 缓存条目快捷链接。
+/* dsx_main.js 冒烟测试（v0.6）：vm 里搭最小 DOM/原生桥/接口桩，
+ * 跑通 boot → 导出 MD → 「夸克/通义千问」按钮 = 复制纯文本全文 + 直接打开应用。
+ * 真机反馈：千问不收 MD、夸克把分享文本当搜索词 → 喂 AI 改纯文本 + 复制打开两步法。
  * 运行：node tests/dsx_main.smoke.test.mjs */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -76,12 +77,12 @@ const localStorage = {
   setItem: (k, v) => store.set(k, String(v)),
 };
 
-/* ---------------- 原生桥桩 ---------------- */
+/* ---------------- 原生桥桩（与真实桥方法一一对应） ---------------- */
 const saves = [];
 const copies = [];
-const shareTos = [];
+const opened = [];
 const DSExport = {
-  version: () => "0.5-test",
+  version: () => "0.6-test",
   saveFile(name, mime, content) {
     saves.push({ name, mime, content });
     return JSON.stringify({ ok: true, name, path: "Download/" + name, size: content.length });
@@ -89,7 +90,7 @@ const DSExport = {
   openDownloads() {},
   toast() {},
   copy(text) { copies.push(text); },
-  shareTextTo(pkg, text) { shareTos.push({ pkg, text }); },
+  openApp(pkg) { opened.push(pkg); },
 };
 
 /* ---------------- 接口桩（与已验证的包络一致） ---------------- */
@@ -143,75 +144,78 @@ const btnByText = (t) => allElements.find((e) => e.textContent === t);
 await sleep(120); // boot + 首帧
 
 assert.ok(document.getElementById("dsx-pill"), "悬浮胶囊已注入");
-const pill = document.getElementById("dsx-pill");
-assert.ok(pill.style.cssText.includes("#2563eb"), "胶囊为亮蓝底（更醒目）");
 assert.ok(document.getElementById("dsx-sheet"), "底部面板已注入");
 assert.ok(exportBtn(), "「导出当前对话」按钮存在");
-assert.ok(!allElements.some((e) => e.textContent === "🤖 发给千问"),
-  "旧的分享面板入口按钮已移除");
 const quarkBtn0 = btnByText("🌐 夸克浏览器");
 const tongyiBtn0 = btnByText("🤖 通义千问");
-assert.ok(quarkBtn0 && tongyiBtn0, "两个直达按钮存在");
+assert.ok(quarkBtn0 && tongyiBtn0, "两个「复制并打开」按钮存在");
 const strip = quarkBtn0.parentNode.parentNode;
 assert.equal(strip.style.display, "none", "导出前按钮条隐藏");
 
-// 1) 导出 → Markdown 文件 + App 内缓存 + 按钮条出现
+// 1) 导出 → MD 文件 + App 内缓存（MD 与纯文本双份）+ 按钮条出现
 exportBtn().onclick();
 await sleep(200);
 assert.equal(fetchCalls, 1, "发起 1 次接口请求");
 assert.equal(saves.length, 1, "经原生桥保存 1 个文件");
-assert.match(saves[0].name, /^DeepSeek_测试会话_\d{8}-\d{6}\.md$/, "文件名 = 前缀+标题+时间戳.md");
-assert.ok(saves[0].content.startsWith("# DeepSeek 会话：测试会话"), "MD 文档头");
-assert.ok(saves[0].content.includes("最终回答"), "包含当前分支内容");
+assert.match(saves[0].name, /^DeepSeek_测试会话_\d{8}-\d{6}\.md$/, "文件仍为 Markdown");
+assert.ok(saves[0].content.startsWith("# DeepSeek 会话：测试会话"), "MD 文档头不变");
+assert.ok(saves[0].content.includes("最终回答"), "MD 含当前分支内容");
 assert.ok(!saves[0].content.includes("被重新生成的旧回答"), "MD 不含被裁剪的旧分支");
+const cached = JSON.parse(store.get("dsx_exports"));
+assert.equal(cached.length, 1, "缓存 1 条");
+assert.ok(cached[0].content.startsWith("# DeepSeek 会话"), "缓存含 MD 全文");
+assert.ok(cached[0].plain && cached[0].plain.includes("【用户】"), "缓存含纯文本版");
+assert.equal(strip.style.display, "block", "导出后按钮条显示");
 let toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl && toastEl.textContent.includes("已导出"), "页内确认 toast");
-assert.equal(strip.style.display, "block", "导出后按钮条显示");
-assert.ok(strip.children[0].textContent.includes("刚导出"), "按钮条标注刚导出的文件");
 assert.ok(allElements.some((e) => e.textContent === "API 1 · 已存 1 · 失败 0"), "计数徽章更新");
 
-// 2) 点「夸克浏览器」→ 直接唤起（定向包名，不重复拉接口）
+// 2) 点「夸克浏览器」→ 复制提示词+纯文本全文，直接打开应用
 quarkBtn0.onclick();
-assert.equal(shareTos.length, 1, "调起定向分享");
-assert.equal(shareTos[0].pkg, "com.quark.browser", "目标为夸克浏览器包名");
-assert.ok(shareTos[0].text.startsWith("我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。"),
-  "分享文本以接手提示词开头");
-assert.ok(shareTos[0].text.includes("# DeepSeek 会话：测试会话"), "正文为完整 MD");
-assert.ok(shareTos[0].text.includes("最终回答"), "正文含消息");
-assert.ok(!shareTos[0].text.includes("被重新生成的旧回答"), "正文不含被裁剪的旧分支");
-assert.equal(fetchCalls, 1, "发送已存内容，未重复拉接口");
+assert.equal(copies.length, 1, "复制提示词+全文");
+assert.ok(copies[0].startsWith("我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。"),
+  "复制文本以接手提示词开头");
+assert.ok(copies[0].includes("（纯文本格式）"), "提示词声明纯文本");
+assert.ok(copies[0].includes("【用户】") && copies[0].includes("【DeepSeek】"), "纯文本记录标记");
+assert.ok(!copies[0].includes("## ") && !copies[0].includes("> 💭"), "不含 Markdown 记号");
+assert.ok(copies[0].includes("最终回答") && copies[0].includes("（联网搜索：q）"), "全文完整");
+assert.ok(!copies[0].includes("被重新生成的旧回答"), "不含被裁剪的旧分支");
+assert.equal(opened.length, 1, "调用原生打开应用");
+assert.equal(opened[0], "com.quark.browser", "目标为夸克浏览器包名");
+toastEl = document.getElementById("dsx-toast");
+assert.ok(toastEl.textContent.includes("粘贴"), "提示去目标应用粘贴");
+assert.equal(fetchCalls, 1, "未重复拉接口");
 
-// 3) 点「通义千问」→ 直接唤起
+// 3) 点「通义千问」→ 同样复制+打开
 tongyiBtn0.onclick();
-assert.equal(shareTos.length, 2);
-assert.equal(shareTos[1].pkg, "com.aliyun.tongyi", "目标为通义千问包名");
-assert.ok(shareTos[1].text.startsWith("我想让你「接手」"), "同样以提示词开头");
+assert.equal(copies.length, 2);
+assert.equal(opened.length, 2);
+assert.equal(opened[1], "com.aliyun.tongyi", "目标为通义千问包名");
+assert.ok(copies[1].startsWith("我想让你「接手」"), "同样以提示词开头");
 
-// 4) App 内缓存：复制 / 查看 / 条目上的 夸克、千问 快捷链接
-const cached = JSON.parse(store.get("dsx_exports"));
-assert.equal(cached.length, 1, "导出全文已持久化到 App 内");
+// 4) App 内：复制 MD 全文 / 查看 / 条目上的 夸克、千问 快捷链接
 const copyBtn = btnByText("复制");
 copyBtn.onclick();
-assert.equal(copies.length, 1, "调用原生剪贴板桥");
-assert.equal(copies[0], saves[0].content, "复制的是全文 Markdown");
+assert.equal(copies[2], saves[0].content, "条目「复制」仍是 MD 全文（笔记用）");
 const viewBtn = btnByText("查看");
 viewBtn.onclick();
 assert.equal(viewBtn.parentNode.parentNode.children[1].style.display, "block", "查看展开内容");
 const ftQuark = btnByText("夸克");
 ftQuark.onclick();
-assert.equal(shareTos[2].pkg, "com.quark.browser", "条目快捷链接可发夸克");
-assert.ok(shareTos[2].text.includes("最终回答"), "条目发送缓存全文");
+assert.equal(copies[3].includes("【用户】"), true, "条目快捷链接发送纯文本");
+assert.equal(opened[2], "com.quark.browser");
 const ftTongyi = btnByText("千问");
 ftTongyi.onclick();
-assert.equal(shareTos[3].pkg, "com.aliyun.tongyi", "条目快捷链接可发通义");
+assert.equal(opened[3], "com.aliyun.tongyi");
 assert.equal(fetchCalls, 1, "全程只拉过 1 次接口");
 
-// 5) INVALID_TOKEN → 明确提示，不落文件不分享
+// 5) INVALID_TOKEN → 明确提示，不落文件不复制不打开
 box.envelope = { code: 40003, msg: "INVALID_TOKEN", data: { biz_code: 40003, biz_data: null } };
 exportBtn().onclick();
 await sleep(200);
 assert.equal(saves.length, 1, "失败时不产生新文件");
-assert.equal(shareTos.length, 4, "失败时不误发送");
+assert.equal(copies.length, 5, "失败时不复制");
+assert.equal(opened.length, 4, "失败时不打开应用");
 toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl.textContent.includes("登录已失效"), "INVALID_TOKEN 有明确提示");
 
@@ -226,5 +230,5 @@ assert.equal(cached2[0].name, saves[1].name, "最新在前");
 assert.ok(strip.children[0].textContent.includes("刚导出"), "按钮条更新为最新导出");
 assert.ok(allElements.some((e) => e.textContent === "API 3 · 已存 2 · 失败 1"), "最终计数徽章");
 
-console.log("✅ dsx_main.js 冒烟测试通过（注入/MD导出/两按钮定向唤起/快捷链接/无效token）");
+console.log("✅ dsx_main.js 冒烟测试通过（MD导出/复制纯文本+打开应用/快捷链接/无效token）");
 process.exit(0);

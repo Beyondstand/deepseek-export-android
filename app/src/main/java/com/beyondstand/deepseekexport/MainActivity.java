@@ -185,7 +185,7 @@ public class MainActivity extends Activity {
     private class Bridge {
 
         @JavascriptInterface
-        public String version() { return "0.5"; }
+        public String version() { return "0.6"; }
 
         /**
          * 保存文本文件到公共 Download 目录（API 29+ 无需权限）。
@@ -277,25 +277,23 @@ public class MainActivity extends Activity {
         }
 
         /**
-         * 直接唤起指定应用接收文本（v0.5：导出后的「夸克/通义千问」按钮用）。
-         * 应用未安装或未注册接收分享时，自动退回系统分享面板，内容不丢。
+         * 打开指定应用的首页（v0.6：配合 copy() 的「复制并打开」两步法）。
+         * 真机结论：ACTION_SEND 分享文本在千问（不收 MD）与夸克（当搜索词）
+         * 落点都不对；剪贴板 + 打开应用后手动粘贴是两家的通用可靠路径。
          */
         @JavascriptInterface
-        public void shareTextTo(String pkg, String text) {
+        public void openApp(String pkg) {
             runOnUiThread(() -> {
-                Intent base = new Intent(Intent.ACTION_SEND);
-                base.setType("text/plain");
-                base.putExtra(Intent.EXTRA_TEXT, text == null ? "" : text);
-                base.putExtra(Intent.EXTRA_TITLE, "DeepSeek 对话 · 接手提示词+全文");
                 try {
-                    startActivity(new Intent(base).setPackage(pkg)); // 直接唤起指定应用
-                } catch (Exception e) {
-                    try {
-                        startActivity(Intent.createChooser(base, "把对话发给哪个应用？"));
-                        toastOnUiThread("未找到 " + pkg + "，已打开系统分享面板");
-                    } catch (Exception e2) {
-                        toastOnUiThread("调起分享失败：" + e2.getMessage());
+                    Intent it = getPackageManager().getLaunchIntentForPackage(pkg);
+                    if (it == null) {
+                        toastOnUiThread("未找到应用 " + pkg + "（未安装？全文已在剪贴板）");
+                        return;
                     }
+                    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(it);
+                } catch (Exception e) {
+                    toastOnUiThread("打开应用失败：" + e.getMessage());
                 }
             });
         }

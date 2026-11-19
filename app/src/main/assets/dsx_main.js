@@ -3,8 +3,11 @@
  * 由 MainActivity 在 chat.deepseek.com 页面加载完成后注入（幂等）。
  *
  * v0.4：把「接手提示词 + 完整对话(MD)」分享给千问/夸克，继承原对话上下文。
- * v0.5 变化：导出成功后面板出现「夸克浏览器 / 通义千问」两个按钮，
- * 点选直接唤起对应应用（未安装则自动退回系统分享面板，内容不丢）。
+ * v0.5：导出后「夸克/通义千问」两按钮直接唤起应用。
+ * v0.6 变化（真机反馈）：ACTION_SEND 在千问（不收 MD）/夸克（当搜索词）落点
+ * 都不对 → 改「复制全文并打开」两步法：喂给 AI 的文本用纯文本（buildTxt），
+ * 复制走剪贴板桥，打开走 getLaunchIntentForPackage（到应用首页，非搜索页）；
+ * 文件导出仍为 .md 不变。
  *
  * v0.3 变化（真机验证 v0.2 后的用户反馈）：
  *   - 导出只存 Markdown（.md），不再出 HTML/TXT 文件；
@@ -22,7 +25,7 @@
   if (window.__DSX_MAIN__) return; // 幂等：整页刷新由 Java 侧重新注入
   window.__DSX_MAIN__ = true;
 
-  var VERSION = "v0.5";
+  var VERSION = "v0.6";
 
   /* ---------------- 小工具 ---------------- */
   function pad(n) { return String(n).padStart(2, "0"); }
@@ -217,16 +220,17 @@
         if (!s.id) s.id = where.id;
         if (!s.title || s.title === "(未命名会话)") s.title = "会话";
         var content = DSExp.buildMd(s);
+        var plain = DSExp.buildTxt(s); // 喂给 AI 的纯文本版（千问不收 MD）
         var name = "DeepSeek_" + DSExp.sanitizeFilename(s.title) + "_"
                  + DSExp.stampForFilename() + ".md";
         diag("拉取成功：" + s.messages.length + " 条消息，生成 Markdown " + fmtBytes(content.length));
-        addExport(name, content); // 储存在 App 内：随取随复制
-        S.lastExport = { name: name, content: content };
+        addExport(name, content, plain); // 储存在 App 内：随取随复制
+        S.lastExport = { name: name, md: content, plain: plain };
         showFeedStrip();
         var r = saveViaBridge(name, "text/markdown;charset=utf-8", content);
         S.counts.save++;
         diag("已保存 " + r.path + "（「最近导出」可一键复制全文）", "ok");
-        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → Download 目录\n点下方「夸克 / 通义千问」直接接着聊");
+        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → Download 目录\n点下方「夸克 / 通义千问」：复制全文并打开粘贴");
         try { bridge().toast("DS导出：已保存 " + r.name); } catch (_) {}
       })
       .catch(function (e) {
@@ -247,7 +251,7 @@
    * 已替用户写好；想自定义就改这里（导出正文会接在提示词后面）。 */
   var QIANWEN_PROMPT = [
     "我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。",
-    "下面是完整的对话记录（Markdown 格式），请通读后：",
+    "下面是完整的对话记录（纯文本格式），请通读后：",
     "",
     "1. 把它当作你自己的对话记忆：延续已有话题、目标和进度，从我停止的地方继续当我的助手；",
     "2. 记住对话中我的背景、偏好和约束，后续回答保持一致，不要让我重复已知信息；",
@@ -255,7 +259,7 @@
     "4. 引用对话内容时忠实原文，不要编造我没说过的话；",
     "5. 之后请沿用对话中的语言和风格回答。",
     "",
-    "记录中「👤 用户」是我，「🤖 DeepSeek」是原助手；「💭 思考过程」「🔍 联网搜索」是原助手的辅助内容，可作背景参考。",
+    "记录中「【用户】」开头的是我，「【DeepSeek】」开头的是原助手；（思考过程）（联网搜索）是原助手的辅助内容，可作背景参考。",
     "",
     "---",
     "（以下为完整对话记录）",
@@ -269,29 +273,30 @@
     { label: "🤖 通义千问", pkg: "com.aliyun.tongyi" },
   ];
 
-  function feedTo(pkg, appName, md, label) {
+  function feedTo(pkg, appName, body, label) {
     var b = bridge();
-    if (!b || !b.shareTextTo) { diag("原生桥不支持定向分享（请确认 App 已更新到 0.5+）", "bad"); return; }
-    var text = QIANWEN_PROMPT + "\n" + md;
-    diag("唤起 " + appName + "（" + fmtBytes(text.length) + "）：" + label);
-    try {
-      b.shareTextTo(pkg, text);
-      diag("已请求唤起 " + appName, "ok");
-      toastMsg("🚀 正在唤起 " + appName + "：\n提示词 + 完整对话已带上，发送即可继续聊");
-    } catch (e) {
+    if (!b || !b.openApp || !b.copy) { diag("原生桥不支持复制/唤起（请确认 App 已更新到 0.6+）", "bad"); return; }
+    var text = QIANWEN_PROMPT + "\n" + body;
+    try { b.copy(text); }
+    catch (e) { diag("复制失败：" + ((e && e.message) || e), "bad"); return; }
+    diag("全文已复制（" + fmtBytes(text.length) + "），唤起 " + appName + "：" + label);
+    try { b.openApp(pkg); }
+    catch (e) {
       diag("唤起失败：" + ((e && e.message) || e), "bad");
-      toastMsg("⚠ 唤起失败：" + ((e && e.message) || e), true);
+      toastMsg("⚠ 全文已在剪贴板，但唤起 " + appName + " 失败，可手动打开后粘贴", true);
+      return;
     }
+    toastMsg("✅ 提示词+全文已复制（纯文本）\n已打开 " + appName + "：\n进 AI 聊天 → 长按输入框 → 粘贴 → 发送");
   }
 
-  /** 「导出后」按钮：发送最近一次导出的全文（不重复拉接口）。 */
+  /** 「导出后」按钮：复制最近一次导出的全文（纯文本）并打开目标应用。 */
   function feedLast(t) {
-    if (!S.lastExport || !S.lastExport.content) {
+    if (!S.lastExport) {
       diag("还没有刚导出的内容：先点「导出当前对话」", "bad");
       toastMsg("⚠ 先导出一次，再选 AI 接着聊", true);
       return;
     }
-    feedTo(t.pkg, t.label, S.lastExport.content, S.lastExport.name);
+    feedTo(t.pkg, t.label, S.lastExport.plain || S.lastExport.md, S.lastExport.name);
   }
 
   /** 导出成功后显示（或更新）「选个 AI 接着聊」按钮条。 */
@@ -303,8 +308,9 @@
   }
 
   /* ---------------- 最近导出（App 内缓存） ---------------- */
-  function addExport(name, content) {
-    S.exports.unshift({ name: name, time: nowStr(), len: content.length, content: content });
+  function addExport(name, md, plain) {
+    S.exports.unshift({ name: name, time: nowStr(), len: md.length,
+                        content: md, plain: plain });
     if (S.exports.length > 10) S.exports.length = 10;
     persistExports();
     renderExports();
@@ -340,13 +346,13 @@
       var ftQuark = el("a", LINK_CSS, "夸克");
       ftQuark.onclick = function () {
         if (!x.content) { diag("该条过大未缓存全文，请先重新导出当前对话", "bad"); return; }
-        feedTo("com.quark.browser", "夸克浏览器", x.content, x.name);
+        feedTo("com.quark.browser", "夸克浏览器", x.plain || x.content, x.name);
       };
       line.appendChild(ftQuark);
       var ftTongyi = el("a", LINK_CSS, "千问");
       ftTongyi.onclick = function () {
         if (!x.content) { diag("该条过大未缓存全文，请先重新导出当前对话", "bad"); return; }
-        feedTo("com.aliyun.tongyi", "通义千问", x.content, x.name);
+        feedTo("com.aliyun.tongyi", "通义千问", x.plain || x.content, x.name);
       };
       line.appendChild(ftTongyi);
       var viewBtn = el("a", LINK_CSS, "查看");
@@ -454,7 +460,7 @@
 
     /* --- 导出后：两个按钮直接唤起指定 AI 客户端 --- */
     var feedStrip = el("div", "display:none;border:1px dashed #374151;border-radius:10px;padding:8px 10px;margin:10px 0 2px;");
-    var stripTxt = el("div", "font-size:12px;color:#93c5fd;margin-bottom:6px;", "刚导出的对话 → 选个 AI 接着聊");
+    var stripTxt = el("div", "font-size:12px;color:#93c5fd;margin-bottom:6px;", "刚导出的对话 → 点选 App：复制全文并打开粘贴");
     feedStrip.appendChild(stripTxt);
     var feedRow = el("div", "");
     AI_TARGETS.forEach(function (t) {
@@ -587,7 +593,8 @@
       bridge() ? "ok" : "bad");
     tokenLoop();
     if (S.exports.length && S.exports[0].content) { // 有历史导出：恢复「接着聊」按钮条
-      S.lastExport = { name: S.exports[0].name, content: S.exports[0].content };
+      S.lastExport = { name: S.exports[0].name, md: S.exports[0].content,
+                       plain: S.exports[0].plain };
       showFeedStrip();
     }
     setInterval(function () { // 看门狗：SPA 移除了节点就重建，保证胶囊常驻
