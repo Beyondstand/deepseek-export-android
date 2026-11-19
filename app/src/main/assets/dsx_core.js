@@ -255,6 +255,42 @@
     return L.join("\n");
   }
 
+  // ---------------- 精简接手包（喂给 AI 用，避免剪贴板超大卡顿） ----------------
+
+  function digestMsgBlock(m, budget) {
+    let body = m.content || "（空消息）";
+    if (body.length > budget) body = body.slice(0, budget) + "…（该条过长已截断）";
+    const head = "【" + (m.role === "user" ? "用户" : "DeepSeek") + "】"
+      + (m.inserted_at ? " " + fmtDateTime(m.inserted_at) : "") + "\n";
+    return head + body + "\n";
+  }
+
+  /** 从最新一条往回取消息，正文总量不超过 maxChars；用于超大对话的复制/发送。 */
+  function buildDigest(s, maxChars) {
+    maxChars = maxChars || 6000;
+    const msgs = s.messages || [];
+    const blocks = [];
+    let used = 0;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const remain = maxChars - used;
+      if (remain <= 200 && blocks.length) break;
+      const block = digestMsgBlock(msgs[i], Math.min(2000, remain));
+      blocks.unshift(block);
+      used += block.length;
+      if (blocks.length >= 60) break;
+    }
+    const L = [];
+    L.push("DeepSeek 会话（精简接手包）");
+    L.push("标题：" + (s.title || "(未命名会话)"));
+    L.push("全部消息：" + msgs.length + " 条 · 以下为最近 " + blocks.length + " 条");
+    L.push("说明：思考过程与联网搜索已省略；完整记录在导出文件中（需要更早上下文时可上传该文件）。");
+    L.push("----------------");
+    for (const b of blocks) L.push(b);
+    L.push("----------------");
+    L.push("（以上为最近 " + blocks.length + " 条消息，完整记录共 " + msgs.length + " 条。）");
+    return L.join("\n");
+  }
+
   // ---------------- 单文件 HTML 导出 ----------------
 
   const HTML_CSS = `
@@ -307,6 +343,7 @@
     buildTxt,
     buildHtml,
     buildMd,
+    buildDigest,
     _extractMessage: extractMessage,
     _branchIds: branchIds,
   };
