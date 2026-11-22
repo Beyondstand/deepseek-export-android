@@ -1,6 +1,6 @@
-/* dsx_main.js 冒烟测试（v0.8）：vm 里搭最小 DOM/原生桥/接口桩。
- * 覆盖：导出 MD → 小对话复制并打开（完整纯文本）；大对话「分段复制」：
- * 第 1 段（含接手提示词）→ 复制下一段接力 → 末段「发送完毕」尾注 → 重置。
+/* dsx_main.js 冒烟测试（v0.9）：vm 里搭最小 DOM/原生桥/接口桩。
+ * 覆盖：导出 MD → 三渠道（夸克/通义/元宝）格子接力（自动取下一格）→
+ * Jupyter 式格子列表（状态/单独复制/展开）→ 重置 → INVALID_TOKEN 分支。
  * 运行：node tests/dsx_main.smoke.test.mjs */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -19,9 +19,18 @@ class FakeElement {
   constructor(tag) {
     this.tagName = tag.toUpperCase();
     this.children = [];
-    this.textContent = "";
     this.parentNode = null;
     this.handlers = {};
+    // 与真实 DOM 一致：设置 textContent 会清空子节点
+    const self = this;
+    Object.defineProperty(this, "textContent", {
+      configurable: true,
+      get() { return self._text || ""; },
+      set(v) {
+        self._text = String(v == null ? "" : v);
+        self.children = [];
+      },
+    });
     // 模拟真实 DOM：cssText 赋值会把 k:v; 声明解析成 style 上的 camelCase 属性
     const styleObj = {};
     Object.defineProperty(styleObj, "cssText", {
@@ -82,7 +91,7 @@ const saves = [];
 const copies = [];
 const opened = [];
 const DSExport = {
-  version: () => "0.8-test",
+  version: () => "0.9-test",
   saveFile(name, mime, content) {
     saves.push({ name, mime, content });
     return JSON.stringify({ ok: true, name, path: "Download/" + name, size: content.length });
@@ -159,11 +168,12 @@ assert.ok(document.getElementById("dsx-sheet"), "底部面板已注入");
 assert.ok(exportBtn(), "「导出当前对话」按钮存在");
 const quarkBtn0 = btnByText("🌐 夸克浏览器");
 const tongyiBtn0 = btnByText("🤖 通义千问");
-assert.ok(quarkBtn0 && tongyiBtn0, "两个「复制并打开」按钮存在");
+const yuanbaoBtn0 = btnByText("🐧 腾讯元宝");
+assert.ok(quarkBtn0 && tongyiBtn0 && yuanbaoBtn0, "三个渠道按钮存在");
 const strip = quarkBtn0.parentNode.parentNode;
 assert.equal(strip.style.display, "none", "导出前按钮条隐藏");
 
-// 1) 小对话导出 → MD 文件 + 缓存（MD/纯文本，无分段）+ 按钮条出现
+// 1) 小对话导出 → 1 格（全文+提示词同格）
 exportBtn().onclick();
 await sleep(200);
 assert.equal(fetchCalls, 1, "发起 1 次接口请求");
@@ -173,54 +183,51 @@ assert.ok(saves[0].content.includes("最终回答"), "MD 含当前分支内容")
 assert.ok(!saves[0].content.includes("被重新生成的旧回答"), "MD 不含被裁剪的旧分支");
 const cached = JSON.parse(store.get("dsx_exports"));
 assert.equal(cached.length, 1, "缓存 1 条");
-assert.ok(cached[0].plain && cached[0].plain.includes("【用户】"), "缓存含纯文本版");
-assert.equal(cached[0].units, null, "小对话不分段");
+assert.equal(cached[0].units.length, 1, "小对话只有 1 格");
+assert.deepEqual(cached[0].copied, [], "初始无已复制格");
 assert.equal(strip.style.display, "block", "导出后按钮条显示");
+const cellsBox = strip.children[3];
+assert.equal(cellsBox.children.length, 1, "格子列表 1 格");
 let toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl && toastEl.textContent.includes("已导出"), "页内确认 toast");
 assert.ok(allElements.some((e) => e.textContent === "API 1 · 已存 1 · 失败 0"), "计数徽章更新");
 
-// 2) 小对话 → 点「夸克浏览器」= 复制完整纯文本 + 打开
+// 2) 小对话 → 夸克 = 复制第 1/1 格（完整纯文本）+ 打开
 quarkBtn0.onclick();
 assert.equal(copies.length, 1, "复制提示词+全文");
 assert.ok(copies[0].startsWith("我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。"),
   "复制文本以接手提示词开头");
-assert.ok(copies[0].includes("下面是完整的对话记录（纯文本格式）"), "完整模式引言");
+assert.ok(copies[0].includes("下面是完整的对话记录（纯文本格式）"), "单格用完整引言");
 assert.ok(copies[0].includes("【用户】") && copies[0].includes("【DeepSeek】"), "纯文本记录标记");
 assert.ok(!copies[0].includes("## ") && !copies[0].includes("> 💭"), "不含 Markdown 记号");
 assert.ok(copies[0].includes("最终回答"), "全文完整");
 assert.equal(opened.length, 1, "调用原生打开应用");
 assert.equal(opened[0], "com.quark.browser", "目标为夸克浏览器包名");
+assert.equal(JSON.parse(store.get("dsx_exports"))[0].copied[0], true, "格子标记已复制");
+assert.equal(cellsBox.children[0].style.cssText.includes("#22c55e"), true, "复制后格子变绿");
 toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl.textContent.includes("粘贴"), "提示去目标应用粘贴");
 assert.equal(fetchCalls, 1, "未重复拉接口");
 
-// 3) 小对话 → 通义千问 + 条目快捷链接
+// 3) 小对话已发完 → 通义按钮 = 提示全部完毕，不重复复制，仍打开应用
 tongyiBtn0.onclick();
-assert.equal(copies.length, 2);
+assert.equal(copies.length, 1, "全部完毕后不重复复制");
+assert.equal(opened.length, 2, "仍打开应用继续聊");
 assert.equal(opened[1], "com.aliyun.tongyi", "目标为通义千问包名");
-const copyBtn = btnByText("复制");
-copyBtn.onclick();
-assert.equal(copies[2], saves[0].content, "条目「复制」仍是 MD 全文（笔记用）");
-const viewBtn = btnByText("查看");
-viewBtn.onclick();
-assert.equal(viewBtn.parentNode.parentNode.children[1].style.display, "block", "查看展开内容");
-const ftQuark = btnByText("夸克");
-ftQuark.onclick();
-assert.equal(opened[2], "com.quark.browser");
-assert.equal(fetchCalls, 1, "全程只拉过 1 次接口");
+toastEl = document.getElementById("dsx-toast");
+assert.ok(toastEl.textContent.includes("发送完毕"), "全部完毕提示");
 
 // 4) INVALID_TOKEN → 明确提示，不落文件不复制不打开
 box.envelope = { code: 40003, msg: "INVALID_TOKEN", data: { biz_code: 40003, biz_data: null } };
 exportBtn().onclick();
 await sleep(200);
 assert.equal(saves.length, 1, "失败时不产生新文件");
-assert.equal(copies.length, 4, "失败时不复制");
-assert.equal(opened.length, 3, "失败时不打开应用");
+assert.equal(copies.length, 1, "失败时不复制");
+assert.equal(opened.length, 2, "失败时不打开应用");
 toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl.textContent.includes("登录已失效"), "INVALID_TOKEN 有明确提示");
 
-// 5) 大对话导出 → 分段复制：首段（提示词）→ 下一段接力 → 末段尾注
+// 5) 大对话导出 → 自动分多格（>=10 格），进度归零
 box.envelope = OK_BIG();
 exportBtn().onclick();
 await sleep(200);
@@ -231,45 +238,61 @@ const cached2 = JSON.parse(store.get("dsx_exports"));
 assert.equal(cached2.length, 2, "缓存 2 条");
 assert.equal(cached2[0].name, saves[1].name, "最新在前");
 assert.ok(cached2[0].len > 80000, "大对话条目");
-assert.ok(Array.isArray(cached2[0].units) && cached2[0].units.length >= 10, "导出时已分段");
-assert.equal(cached2[0].unitSent, 0, "分段进度初始为 0");
-const qk = btnByText("🌐 夸克浏览器");
-qk.onclick();
-const unit1 = copies[4];
-assert.ok(unit1.length < 20000, "剪贴板只放第 1 段（原 11 万字符）");
-assert.ok(unit1.includes("将分") && unit1.includes("此为第 1/"), "首段带分段说明");
-assert.ok(unit1.includes("长对话开始"), "第 1 段从会话开头开始");
-assert.ok(!unit1.includes("ENDMARK"), "末尾内容不在第 1 段");
-assert.equal(opened[3], "com.quark.browser", "仍直接唤起夸克");
-toastEl = document.getElementById("dsx-toast");
-assert.ok(toastEl.textContent.includes("复制下一段"), "提示接力操作");
+assert.ok(cached2[0].units.length >= 10, "大对话自动拆多格");
+assert.deepEqual(cached2[0].copied, [], "新导出格子未复制");
 const unitLabelEl = strip.children[2].children[0];
-assert.ok(unitLabelEl.textContent.includes("已复制 1/"), "分段进度 1/N");
+assert.ok(unitLabelEl.textContent.includes("已复制 0/"), "进度归零");
+
+// 6) 渠道按钮自动取下一格：夸克→格1，通义→格2，元宝→格3
+quarkBtn0.onclick();
+const unit1 = copies[1];
+assert.ok(unit1.includes("将分") && unit1.includes("此为第 1/"), "首格带分段说明");
+assert.ok(unit1.includes("长对话开始"), "第 1 格从会话开头开始");
+assert.ok(!unit1.includes("ENDMARK"), "末尾内容不在第 1 格");
+assert.equal(opened[2], "com.quark.browser", "仍直接唤起夸克");
+tongyiBtn0.onclick();
+const unit2 = copies[2];
+assert.ok(unit2.includes("第 2/") && unit2.includes("紧接上一条消息"), "第 2 格带接续说明");
+assert.ok(unit2.includes("BIGDATA_"), "第 2 格进入超长消息");
+assert.equal(opened[3], "com.aliyun.tongyi", "通义渠道");
+yuanbaoBtn0.onclick();
+const unit3 = copies[3];
+assert.ok(unit3.includes("第 3/"), "元宝渠道取第 3 格");
+assert.equal(opened[4], "com.tencent.hunyuan.app.chat", "元宝包名正确");
 assert.equal(fetchCalls, 3, "分段不重新拉接口");
+assert.ok(unitLabelEl.textContent.includes("已复制 3/"), "进度 3/N");
 
-// 6) 「复制下一段」接力 → 第 2 段 → 点到末段（尾注）→ 重置
-const nextBtn = btnByText("复制下一段");
-nextBtn.onclick();
-const unit2 = copies[5];
-assert.ok(unit2.includes("第 2/") && unit2.includes("紧接上一条消息"), "下一段带接续说明");
-assert.ok(!unit2.startsWith("我想让你「接手」"), "后续段不再重复完整提示词");
+// 7) 格子列表：单格复制 + 状态
+const cellCopy = cellsBox.children[0].children[0].children[2];
+cellCopy.onclick();
+assert.equal(copies.length, 5, "格子单独复制");
+assert.ok(copies[4].includes("此为第 1/"), "单格复制内容正确");
+assert.equal(JSON.parse(store.get("dsx_exports"))[0].copied[0], true, "首格已复制");
+
+// 8) 一路点夸克取完剩余格 → 末段尾注 → 全部完毕
 let guard = 0;
-while (guard++ < 60) {
+while (guard++ < 100) {
   const item = JSON.parse(store.get("dsx_exports"))[0];
-  if (item.unitSent >= item.units.length) break;
-  btnByText("复制下一段").onclick();
+  const done = item.copied.filter(Boolean).length;
+  if (done >= item.units.length) break;
+  quarkBtn0.onclick();
 }
-const lastUnit = copies[copies.length - 1];
-assert.ok(lastUnit.includes("ENDMARK"), "末段含对话结尾");
-assert.ok(lastUnit.includes("发送完毕"), "最后一段带完毕尾注");
 const finalItem = JSON.parse(store.get("dsx_exports"))[0];
-assert.equal(finalItem.unitSent, finalItem.units.length, "全部段落已取完");
-assert.equal(opened.length, 4, "下一段流程不反复打开应用");
-btnByText("重置").onclick();
-assert.equal(JSON.parse(store.get("dsx_exports"))[0].unitSent, 0, "重置生效");
-assert.ok(allElements.some((e) => e.textContent === "API 3 · 已存 2 · 失败 1"), "最终计数徽章");
-assert.ok(allElements.some((e) => (e.textContent || "").includes("大（分段复制）")),
-  "列表条目标注大对话");
+assert.equal(finalItem.copied.filter(Boolean).length, finalItem.units.length, "全部格子已复制");
+const lastUnit = copies[copies.length - 1];
+assert.ok(lastUnit.includes("发送完毕"), "最后一格带完毕尾注");
+assert.ok(lastUnit.includes("ENDMARK"), "末格含对话结尾");
+assert.equal(JSON.parse(store.get("dsx_exports"))[0].copied.filter(Boolean).length,
+  JSON.parse(store.get("dsx_exports"))[0].units.length, "末格复制后标记完成");
 
-console.log("✅ dsx_main.js 冒烟测试通过（MD导出/复制并打开/大对话分段接力/无效token）");
+// 9) 重置 → 清零，可重新开始
+btnByText("↺ 重置").onclick();
+assert.deepEqual(JSON.parse(store.get("dsx_exports"))[0].copied, [], "重置后清零");
+quarkBtn0.onclick();
+const restartUnit = copies[copies.length - 1];
+assert.ok(restartUnit.includes("此为第 1/"), "重置后从第 1 格重来");
+assert.ok(allElements.some((e) => e.textContent === "API 3 · 已存 2 · 失败 1"), "最终计数徽章");
+assert.ok(allElements.some((e) => (e.textContent || "").includes(" 格")), "列表条目标注格数");
+
+console.log("✅ dsx_main.js 冒烟测试通过（MD导出/三渠道格子接力/单格复制/重置/无效token）");
 process.exit(0);

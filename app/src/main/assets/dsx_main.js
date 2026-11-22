@@ -10,6 +10,9 @@
  *   导出时按 UNIT_CHARS（8 千字）/段拆好存 App 内；点「夸克/千问」复制第 1 段
  *   （含接手提示词）并打开应用；之后点「复制下一段」逐段粘贴发送，最后一段
  *   自带「发送完毕」尾注；分段进度持久化、可重置。buildDigest 移除。
+ * v0.9 变化：新增腾讯元宝渠道（com.tencent.hunyuan.app.chat）；大小对话统一
+ *   走 Jupyter 式「格子接力」——每格有编号/状态/单独复制/可展开，渠道按钮
+ *   自动复制下一格并打开应用；FEED_FULL_LIMIT 移除，全部会话按格拆分。
  *
  * v0.3 变化（真机验证 v0.2 后的用户反馈）：
  *   - 导出只存 Markdown（.md），不再出 HTML/TXT 文件；
@@ -27,7 +30,7 @@
   if (window.__DSX_MAIN__) return; // 幂等：整页刷新由 Java 侧重新注入
   window.__DSX_MAIN__ = true;
 
-  var VERSION = "v0.8";
+  var VERSION = "v0.9";
 
   /* ---------------- 小工具 ---------------- */
   function pad(n) { return String(n).padStart(2, "0"); }
@@ -223,19 +226,18 @@
         if (!s.title || s.title === "(未命名会话)") s.title = "会话";
         var content = DSExp.buildMd(s);
         var plain = DSExp.buildTxt(s); // 喂给 AI 的纯文本版（千问不收 MD）
-        var units = plain.length > FEED_FULL_LIMIT
-          ? DSExp.splitPlainUnits(plain, UNIT_CHARS) : null; // 大对话分段
+        var units = DSExp.splitPlainUnits(plain, UNIT_CHARS); // 统一按格拆分（小会话=1 格）
         var name = "DeepSeek_" + DSExp.sanitizeFilename(s.title) + "_"
                  + DSExp.stampForFilename() + ".md";
-        diag("拉取成功：" + s.messages.length + " 条消息，生成 Markdown " + fmtBytes(content.length)
-          + (units ? "，分 " + units.length + " 段" : ""));
-        var item = addExport(name, content, plain, units); // 储存在 App 内：随取随复制
+        diag("拉取成功：" + s.messages.length + " 条消息，Markdown " + fmtBytes(content.length)
+          + "，分 " + units.length + " 格");
+        var item = addExport(name, content, units); // 储存在 App 内：随取随复制
         S.lastExport = item;
         showFeedStrip();
         var r = saveViaBridge(name, "text/markdown;charset=utf-8", content);
         S.counts.save++;
         diag("已保存 " + r.path + "（「最近导出」可一键复制全文）", "ok");
-        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → Download 目录\n点下方「夸克 / 通义千问」：复制全文并打开粘贴");
+        toastMsg("✅ 已导出：" + r.name + "\n" + s.messages.length + " 条消息 → Download 目录\n点下方「夸克 / 通义 / 元宝」开始格子接力");
         try { bridge().toast("DS导出：已保存 " + r.name); } catch (_) {}
       })
       .catch(function (e) {
@@ -265,69 +267,79 @@
   var PROMPT_TAIL =
     "记录中「【用户】」开头的是我，「【DeepSeek】」开头的是原助手；（思考过程）（联网搜索）是原助手的辅助内容，可作背景参考。";
 
-  /** 组装喂给 AI 的完整文本；mode="full" 或 {k,N}=分段首段。 */
-  function buildFeedText(body, mode) {
-    var intro;
-    if (mode === "full") {
-      intro = "我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。\n"
-        + "下面是完整的对话记录（纯文本格式），请通读后：";
+  /** 组装第 k 格的完整复制文本（含提示词/接续说明/完毕尾注）。 */
+  function cellText(units, k) {
+    var N = units.length;
+    var body = units[k - 1];
+    var t;
+    if (N === 1) {
+      t = "我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。\n"
+        + "下面是完整的对话记录（纯文本格式），请通读后：\n" + PROMPT_RULES
+        + "\n\n" + PROMPT_TAIL + "\n\n---\n（以下为对话记录）\n\n" + body;
+    } else if (k === 1) {
+      t = "我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。\n"
+        + "对话记录较长，将分 " + N + " 条消息发送，此为第 1/" + N + " 条；"
+        + "请先记住本条内容，后续各条紧随其后，全部收完后从记录最后一条继续当我的助手：\n"
+        + PROMPT_RULES + "\n\n" + PROMPT_TAIL
+        + "\n\n---\n（以下为对话记录，分段发送）\n\n" + body;
     } else {
-      intro = "我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。\n"
-        + "对话记录较长，将分 " + mode.N + " 条消息发送，此为第 " + mode.k + "/" + mode.N
-        + " 条；请先记住本条内容，后续各条紧随其后，全部收完后从记录最后一条继续当我的助手：";
+      t = "（DeepSeek 对话记录 第 " + k + "/" + N + " 条，紧接上一条消息）\n\n" + body;
+      if (k === N) t += "\n\n---\n（对话记录发送完毕，共 " + N + " 条。请从最后一条继续当我的助手。）";
     }
-    return intro + "\n" + PROMPT_RULES + "\n\n" + PROMPT_TAIL
-      + "\n\n---\n（以下为对话记录）\n\n" + body;
+    return t;
   }
 
-  /* 体量阈值与分段参数（v0.8）：大对话走「分段复制」流程 */
-  var FEED_FULL_LIMIT = 80000; // 完整复制的字符上限（约 8 万字），超过走分段
-  var UNIT_CHARS = 8000;       // 每段字符预算（约 8 千字，适配应用输入框）
+  /* 分段参数（v0.9）：所有会话统一拆格接力（Jupyter 式格子 UI） */
+  var UNIT_CHARS = 8000; // 每格字符预算（约 8 千字，适配应用输入框）
 
   /* 直达目标（v0.5）：导出后出现两个按钮，点选直接唤起对应应用；
    * 未安装/未注册接收分享时，原生侧自动退回系统分享面板，内容不丢。 */
   var AI_TARGETS = [
     { label: "🌐 夸克浏览器", pkg: "com.quark.browser" },
     { label: "🤖 通义千问", pkg: "com.aliyun.tongyi" },
+    { label: "🐧 腾讯元宝", pkg: "com.tencent.hunyuan.app.chat" },
   ];
 
   function feedTo(pkg, appName, x, label) {
     var b = bridge();
-    if (!b || !b.openApp || !b.copy) { diag("原生桥不支持复制/唤起（请确认 App 已更新到 0.8+）", "bad"); return; }
-    var text, mode;
-    if (x.len > FEED_FULL_LIMIT) {
-      var units = ensureUnits(x);
-      if (!units || !units.length) { diag("分段失败，请重新导出", "bad"); return; }
-      x.unitSent = 1;
+    if (!b || !b.openApp || !b.copy) { diag("原生桥不支持复制/唤起（请确认 App 已更新到 0.9+）", "bad"); return; }
+    var units = ensureUnits(x);
+    if (!units || !units.length) { diag("分段失败，请重新导出", "bad"); return; }
+    var k = nextCell(x, units);
+    if (k) {
+      var text = cellText(units, k);
+      try { b.copy(text); }
+      catch (e) { diag("复制失败：" + ((e && e.message) || e), "bad"); return; }
+      x.copied[k - 1] = true;
       persistExports();
-      text = buildFeedText(units[0], { k: 1, N: units.length });
-      mode = "unit";
+      diag("已复制第 " + k + "/" + units.length + " 格（" + fmtBytes(text.length) + "），唤起 " + appName + "：" + label);
     } else {
-      text = buildFeedText(x.plain || x.content, "full");
-      mode = "full";
+      diag("全部 " + units.length + " 格已复制发送完毕，唤起 " + appName + " 继续聊", "ok");
     }
-    try { b.copy(text); }
-    catch (e) { diag("复制失败：" + ((e && e.message) || e), "bad"); return; }
-    diag("已复制（" + fmtBytes(text.length)
-      + (mode === "unit" ? "，第 1/" + x.units.length + " 段" : "，完整")
-      + "），唤起 " + appName + "：" + label);
     try { b.openApp(pkg); }
     catch (e) {
       diag("唤起失败：" + ((e && e.message) || e), "bad");
-      toastMsg("⚠ 全文已在剪贴板，但唤起 " + appName + " 失败，可手动打开后粘贴", true);
+      toastMsg("⚠ 内容已在剪贴板，但唤起 " + appName + " 失败，可手动打开后粘贴", true);
       return;
     }
-    if (mode === "unit") {
-      toastMsg("✅ 已复制第 1/" + x.units.length + " 段\n已打开 " + appName + "：粘贴发送\n回 App 点「复制下一段」继续，发完即可接手");
-      renderUnitProgress(x);
+    if (k) {
+      toastMsg("✅ 已复制第 " + k + "/" + units.length + " 格\n已打开 " + appName + "：粘贴发送\n回 App 再点渠道按钮取下一格");
     } else {
-      toastMsg("✅ 提示词+全文已复制（纯文本）\n已打开 " + appName + "：\n进 AI 聊天 → 长按输入框 → 粘贴 → 发送");
+      toastMsg("✅ 全部 " + units.length + " 格已发送完毕\n已打开 " + appName + "，继续聊即可");
     }
+    renderUnitProgress(x);
+    refreshCells(x);
   }
 
-  /** 确保大对话的分段已生成（按需生成并持久化到缓存）。 */
+  /** 下一个未复制格（1-based）；全部复制完返回 null。 */
+  function nextCell(x, units) {
+    var copied = x.copied || [];
+    for (var i = 0; i < units.length; i++) if (!copied[i]) return i + 1;
+    return null;
+  }
+
+  /** 确保分段已生成（旧缓存按需补算并持久化）。 */
   function ensureUnits(x) {
-    if (x.len <= FEED_FULL_LIMIT) return null;
     if (!x.units || !x.units.length) {
       x.units = DSExp.splitPlainUnits(x.plain || x.content, UNIT_CHARS);
       persistExports();
@@ -335,50 +347,78 @@
     return x.units;
   }
 
-  /** 第 k（>1）段文本：带接续说明；最后一段带「发送完毕」尾注。 */
-  function unitText(units, k) {
-    var N = units.length;
-    var t = "（DeepSeek 对话记录 第 " + k + "/" + N + " 条，紧接上一条消息）\n\n" + units[k - 1];
-    if (k === N) t += "\n\n---\n（对话记录发送完毕，共 " + N + " 条。请从最后一条继续当我的助手。）";
-    return t;
+  function copiedCount(x, units) {
+    var n = 0;
+    for (var i = 0; i < units.length; i++) if (x.copied && x.copied[i]) n++;
+    return n;
   }
 
-  /** 分段流程：复制下一段（只复制不打开——用户在目标应用与 App 间切换接力）。 */
-  function copyNextUnit(x) {
-    var b = bridge();
-    if (!b || !b.copy) { diag("原生桥不支持复制", "bad"); return; }
-    var units = ensureUnits(x);
-    if (!units) { diag("该记录无需分段", "bad"); return; }
-    var k = (x.unitSent || 0) + 1;
-    if (k > units.length) {
-      diag("全部分段已复制（" + units.length + " 段）", "ok");
-      toastMsg("✅ 共 " + units.length + " 段已全部复制发送完毕；如需重头再来点「重置」");
-      return;
-    }
-    var text = k === 1 ? buildFeedText(units[0], { k: 1, N: units.length }) : unitText(units, k);
-    try { b.copy(text); }
-    catch (e) { diag("复制失败：" + ((e && e.message) || e), "bad"); return; }
-    x.unitSent = k;
-    persistExports();
-    renderUnitProgress(x);
-    diag("已复制第 " + k + "/" + units.length + " 段", "ok");
-    toastMsg("📋 已复制第 " + k + "/" + units.length + " 段\n切到 AI 应用粘贴发送，再回来取下一段");
-  }
-
-  /** 重置某条记录的分段进度。 */
+  /** 重置格子状态。 */
   function resetUnit(x) {
-    x.unitSent = 0;
+    x.copied = [];
     persistExports();
     renderUnitProgress(x);
-    diag("分段进度已重置");
+    refreshCells(x);
+    diag("格子状态已重置");
   }
 
-  /** 分段进度条（大对话才显示）。 */
+  /** Jupyter 式格子列表渲染。 */
+  function renderCells(x, container) {
+    if (!container) return;
+    container.textContent = "";
+    var units = ensureUnits(x);
+    var copied = x.copied || [];
+    units.forEach(function (u, idx) {
+      var k = idx + 1;
+      var done = !!copied[idx];
+      var cell = el("div", "border:1px solid #1f2937;border-left:4px solid "
+        + (done ? "#22c55e" : "#6b7280") + ";border-radius:8px;padding:6px 8px;margin:5px 0;background:#0b1220;");
+      var line = el("div", "display:flex;align-items:center;gap:8px;");
+      line.appendChild(el("span", "color:#93c5fd;font:700 12px Menlo,Consolas,monospace;white-space:nowrap;",
+        "[" + k + "/" + units.length + "]"));
+      var tag = (k === 1 ? "含接手提示词 · " : "")
+        + (k === units.length && units.length > 1 ? "完毕尾注 · " : "");
+      var prev = el("span", "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;"
+        + "white-space:nowrap;font-size:12px;color:#d1d5db;",
+        tag + u.replace(/\s+/g, " ").slice(0, 26) + "… · " + fmtBytes(u.length)
+          + (done ? " ✓" : ""));
+      line.appendChild(prev);
+      var cp = el("a", LINK_CSS, "复制");
+      cp.onclick = function () {
+        var bb = bridge();
+        if (!bb || !bb.copy) { diag("原生桥不支持复制", "bad"); return; }
+        var text = cellText(units, k);
+        try { bb.copy(text); }
+        catch (e) { diag("复制失败：" + ((e && e.message) || e), "bad"); return; }
+        x.copied[idx] = true;
+        persistExports();
+        renderCells(x, container);
+        renderUnitProgress(x);
+        diag("已复制第 " + k + "/" + units.length + " 格", "ok");
+        toastMsg("📋 已复制第 " + k + "/" + units.length + " 格\n切到 AI 应用粘贴发送");
+      };
+      line.appendChild(cp);
+      cell.appendChild(line);
+      var pre = el("pre", "display:none;margin:6px 0 0;background:#000;color:#a7f3d0;border-radius:8px;"
+        + "padding:8px 10px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all;"
+        + "font:11px/1.5 Menlo,Consolas,monospace;", u);
+      cell.appendChild(pre);
+      prev.onclick = function () { pre.style.display = pre.style.display === "none" ? "block" : "none"; };
+      container.appendChild(cell);
+    });
+  }
+
+  /** 仅当 x 是最新导出时刷新面板里的格子视图。 */
+  function refreshCells(x) {
+    if (S.lastExport && x === S.lastExport && ui.cellsBox) renderCells(x, ui.cellsBox);
+  }
+
+  /** 格子进度行。 */
   function renderUnitProgress(x) {
     x = x || S.lastExport;
     if (!ui.unitLine) return;
     if (x && ensureUnits(x)) {
-      ui.unitLabel.textContent = "分段进度：已复制 " + (x.unitSent || 0) + "/" + x.units.length + " 段";
+      ui.unitLabel.textContent = "已复制 " + copiedCount(x, x.units) + "/" + x.units.length + " 格";
       ui.unitLine.style.display = "block";
     } else {
       ui.unitLine.style.display = "none";
@@ -395,18 +435,20 @@
     feedTo(t.pkg, t.label, S.lastExport, S.lastExport.name);
   }
 
-  /** 导出成功后显示（或更新）「选个 AI 接着聊」按钮条。 */
+  /** 导出成功后显示（或更新）接力按钮条与格子列表。 */
   function showFeedStrip() {
     if (!ui.feedStrip) return;
     if (ui.feedStripTxt && S.lastExport)
-      ui.feedStripTxt.textContent = "刚导出：" + S.lastExport.name + " → 选个 AI 接着聊";
+      ui.feedStripTxt.textContent = "刚导出：" + S.lastExport.name + " → 选渠道开始接力";
     ui.feedStrip.style.display = "block";
+    renderUnitProgress(S.lastExport);
+    if (ui.cellsBox) renderCells(S.lastExport, ui.cellsBox);
   }
 
   /* ---------------- 最近导出（App 内缓存） ---------------- */
-  function addExport(name, md, plain, units) {
+  function addExport(name, md, units) {
     var item = { name: name, time: nowStr(), len: md.length,
-                 content: md, plain: plain, units: units, unitSent: 0 };
+                 content: md, units: units, copied: [] };
     S.exports.unshift(item);
     if (S.exports.length > 10) S.exports.length = 10;
     persistExports();
@@ -426,11 +468,12 @@
     S.exports.forEach(function (x) {
       var row = el("div", "border:1px solid #1f2937;border-radius:10px;padding:8px 10px;margin:6px 0;");
       var line = el("div", "display:flex;align-items:center;gap:10px;");
+      var unitsHere = ensureUnits(x);
       line.appendChild(el("span",
         "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
         + "font-size:12.5px;color:#e5e7eb;",
         "📄 " + x.name + " · " + fmtBytes(x.len)
-          + (x.len > FEED_FULL_LIMIT ? " · 大（分段复制）" : "")));
+          + (unitsHere ? " · " + unitsHere.length + " 格" : "")));
       var copyBtn = el("a", LINK_CSS, "复制");
       copyBtn.onclick = function () {
         if (!x.content) { diag("该条过大未缓存全文，请到 Download 目录打开文件", "bad"); return; }
@@ -454,25 +497,23 @@
         feedTo("com.aliyun.tongyi", "通义千问", x, x.name);
       };
       line.appendChild(ftTongyi);
-      if (x.len > FEED_FULL_LIMIT) {
-        var nx = el("a", LINK_CSS, "下一段");
-        nx.onclick = function () {
-          if (!x.content) { diag("该条过大未缓存全文，请先重新导出当前对话", "bad"); return; }
-          copyNextUnit(x);
-        };
-        line.appendChild(nx);
-      }
+      var ftYuanbao = el("a", LINK_CSS, "元宝");
+      ftYuanbao.onclick = function () {
+        if (!x.content) { diag("该条过大未缓存全文，请先重新导出当前对话", "bad"); return; }
+        feedTo("com.tencent.hunyuan.app.chat", "腾讯元宝", x, x.name);
+      };
+      line.appendChild(ftYuanbao);
       var viewBtn = el("a", LINK_CSS, "查看");
       line.appendChild(viewBtn);
       row.appendChild(line);
-      var box = el("pre",
-        "display:none;margin:6px 0 0;background:#000;color:#a7f3d0;border-radius:8px;"
-        + "padding:8px 10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;"
-        + "font:11px/1.5 Menlo,Consolas,monospace;",
-        x.content || "（内容过大未缓存，请打开 Download 里的 .md 文件）");
+      var box = el("div",
+        "display:none;margin:6px 0 0;background:#000;border-radius:8px;"
+        + "padding:8px 10px;max-height:260px;overflow:auto;");
       row.appendChild(box);
       viewBtn.onclick = function () {
-        box.style.display = box.style.display === "none" ? "block" : "none";
+        var show = box.style.display === "none";
+        box.style.display = show ? "block" : "none";
+        if (show) renderCells(x, box); // 打开时渲染格子（状态最新）
       };
       ui.exportsList.appendChild(row);
     });
@@ -567,7 +608,7 @@
 
     /* --- 导出后：两个按钮直接唤起指定 AI 客户端 --- */
     var feedStrip = el("div", "display:none;border:1px dashed #374151;border-radius:10px;padding:8px 10px;margin:10px 0 2px;");
-    var stripTxt = el("div", "font-size:12px;color:#93c5fd;margin-bottom:6px;", "刚导出的对话 → 点选 App：复制全文并打开粘贴");
+    var stripTxt = el("div", "font-size:12px;color:#93c5fd;margin-bottom:6px;", "刚导出的对话 → 点渠道按钮：复制下一格并打开");
     feedStrip.appendChild(stripTxt);
     var feedRow = el("div", "");
     AI_TARGETS.forEach(function (t) {
@@ -577,18 +618,18 @@
     });
     feedStrip.appendChild(feedRow);
 
-    /* 分段进度（大对话显示）：复制下一段 / 重置 */
+    /* 格子进度 + Jupyter 式格子列表（所有会话统一） */
     var unitLine = el("div", "display:none;margin-top:8px;font-size:12px;color:#93c5fd;");
     var unitLabel = el("span", "", "");
     unitLine.appendChild(unitLabel);
-    var nextBtn = el("a", LINK_CSS + "margin-left:10px;", "复制下一段");
-    unitLine.appendChild(nextBtn);
-    var resetBtn = el("a", LINK_CSS + "margin-left:10px;", "重置");
+    var resetBtn = el("a", LINK_CSS + "margin-left:10px;", "↺ 重置");
     unitLine.appendChild(resetBtn);
     feedStrip.appendChild(unitLine);
+    var cellsBox = el("div", "display:none;margin-top:6px;max-height:240px;overflow:auto;");
+    feedStrip.appendChild(cellsBox);
     ui.unitLine = unitLine;
     ui.unitLabel = unitLabel;
-    nextBtn.onclick = function () { if (S.lastExport) copyNextUnit(S.lastExport); };
+    ui.cellsBox = cellsBox;
     resetBtn.onclick = function () { if (S.lastExport) resetUnit(S.lastExport); };
 
     sheet.appendChild(feedStrip);
