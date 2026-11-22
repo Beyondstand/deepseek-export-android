@@ -74,19 +74,20 @@ assert.ok(md.includes("最终回答"));
 assert.ok(!md.includes("被重新生成的旧回答"), "MD 不含被裁分支");
 assert.ok(md.includes("由 DeepSeek 会话导出工具生成 · 非官方"));
 
-// ---------------- 精简接手包（超大对话防剪贴板卡顿） ----------------
-const dig = DSExp.buildDigest(s, 120);
-assert.ok(dig.includes("精简接手包"), "精简包头");
-assert.ok(dig.includes("最近"), "说明取最近若干条");
-assert.ok(dig.includes("最终回答"), "包含最新一条");
-assert.ok(!dig.includes("你好"), "预算内放不下最早消息");
-assert.ok(dig.length < 120 + 400, "正文受预算约束（允许头部开销）");
-const bigS = DSExp.normalizeSession(
-  { id: "b", title: "超长", current_message_id: 1 },
-  [{ message_id: 1, parent_id: null, role: "ASSISTANT", inserted_at: 1,
-     fragments: [{ type: "RESPONSE", content: "X".repeat(5000) }] }]);
-const digBig = DSExp.buildDigest(bigS, 6000);
-assert.ok(digBig.length < 5000, "单条超长会被截断");
-assert.ok(digBig.includes("该条过长已截断"), "截断标注");
+// ---------------- 分段复制（大对话按 unit 拆分） ----------------
+const longPlain = Array.from({ length: 30 }, (_, i) =>
+  "【" + (i % 2 ? "DeepSeek" : "用户") + "】 第" + i + "条\n" + "内容".repeat(200) + " 第" + i + "条结束"
+).join("\n\n");
+const unitsLong = DSExp.splitPlainUnits(longPlain, 2000);
+assert.ok(unitsLong.length >= 5, "拆成多段");
+unitsLong.forEach((u) => assert.ok(u.length <= 2000, "每段不超预算"));
+const rejoined = unitsLong.join("\n");
+for (let i = 0; i < 30; i++) assert.ok(rejoined.includes("第" + i + "条结束"), "第 " + i + " 条不丢");
+assert.equal(rejoined.split("【用户】").length - 1, 15, "用户消息标记不丢");
+
+const oversize = DSExp.splitPlainUnits("【用户】 超长\n" + "长".repeat(9000), 2000);
+assert.ok(oversize.length >= 5, "超长单条被硬切成多段");
+oversize.forEach((u) => assert.ok(u.length <= 2000, "硬切段不超预算"));
+assert.ok(oversize.join("").includes("长"), "内容保留");
 
 console.log("✅ dsx_core.js 全部测试通过");

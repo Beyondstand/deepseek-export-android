@@ -21,8 +21,8 @@ android {
         applicationId "com.beyondstand.deepseekexport"
         minSdk 29          // MediaStore.Downloads 无需权限的起点
         targetSdk 34
-        versionCode 7
-        versionName "0.7"
+        versionCode 8
+        versionName "0.8"
     }
 
     buildTypes {

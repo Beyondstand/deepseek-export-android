@@ -1,5 +1,6 @@
-/* dsx_main.js 冒烟测试（v0.7）：vm 里搭最小 DOM/原生桥/接口桩。
- * 覆盖：导出 MD → 复制并打开（小对话=完整纯文本；大对话=精简接手包防剪贴板卡顿）。
+/* dsx_main.js 冒烟测试（v0.8）：vm 里搭最小 DOM/原生桥/接口桩。
+ * 覆盖：导出 MD → 小对话复制并打开（完整纯文本）；大对话「分段复制」：
+ * 第 1 段（含接手提示词）→ 复制下一段接力 → 末段「发送完毕」尾注 → 重置。
  * 运行：node tests/dsx_main.smoke.test.mjs */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -81,7 +82,7 @@ const saves = [];
 const copies = [];
 const opened = [];
 const DSExport = {
-  version: () => "0.7-test",
+  version: () => "0.8-test",
   saveFile(name, mime, content) {
     saves.push({ name, mime, content });
     return JSON.stringify({ ok: true, name, path: "Download/" + name, size: content.length });
@@ -162,7 +163,7 @@ assert.ok(quarkBtn0 && tongyiBtn0, "两个「复制并打开」按钮存在");
 const strip = quarkBtn0.parentNode.parentNode;
 assert.equal(strip.style.display, "none", "导出前按钮条隐藏");
 
-// 1) 小对话导出 → MD 文件 + 缓存（MD/纯文本/精简包三份）+ 按钮条出现
+// 1) 小对话导出 → MD 文件 + 缓存（MD/纯文本，无分段）+ 按钮条出现
 exportBtn().onclick();
 await sleep(200);
 assert.equal(fetchCalls, 1, "发起 1 次接口请求");
@@ -173,7 +174,7 @@ assert.ok(!saves[0].content.includes("被重新生成的旧回答"), "MD 不含�
 const cached = JSON.parse(store.get("dsx_exports"));
 assert.equal(cached.length, 1, "缓存 1 条");
 assert.ok(cached[0].plain && cached[0].plain.includes("【用户】"), "缓存含纯文本版");
-assert.ok(cached[0].digest && cached[0].digest.includes("精简接手包"), "缓存含精简接手包");
+assert.equal(cached[0].units, null, "小对话不分段");
 assert.equal(strip.style.display, "block", "导出后按钮条显示");
 let toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl && toastEl.textContent.includes("已导出"), "页内确认 toast");
@@ -184,11 +185,10 @@ quarkBtn0.onclick();
 assert.equal(copies.length, 1, "复制提示词+全文");
 assert.ok(copies[0].startsWith("我想让你「接手」一段我和另一个 AI 助手（DeepSeek）的对话。"),
   "复制文本以接手提示词开头");
-assert.ok(copies[0].includes("（以下为对话记录）"), "提示词与正文分隔");
+assert.ok(copies[0].includes("下面是完整的对话记录（纯文本格式）"), "完整模式引言");
 assert.ok(copies[0].includes("【用户】") && copies[0].includes("【DeepSeek】"), "纯文本记录标记");
 assert.ok(!copies[0].includes("## ") && !copies[0].includes("> 💭"), "不含 Markdown 记号");
 assert.ok(copies[0].includes("最终回答"), "全文完整");
-assert.ok(!copies[0].includes("精简接手包"), "小对话走完整模式");
 assert.equal(opened.length, 1, "调用原生打开应用");
 assert.equal(opened[0], "com.quark.browser", "目标为夸克浏览器包名");
 toastEl = document.getElementById("dsx-toast");
@@ -220,7 +220,7 @@ assert.equal(opened.length, 3, "失败时不打开应用");
 toastEl = document.getElementById("dsx-toast");
 assert.ok(toastEl.textContent.includes("登录已失效"), "INVALID_TOKEN 有明确提示");
 
-// 5) 大对话导出 → 喂 AI 自动改发精简接手包（防剪贴板卡顿）
+// 5) 大对话导出 → 分段复制：首段（提示词）→ 下一段接力 → 末段尾注
 box.envelope = OK_BIG();
 exportBtn().onclick();
 await sleep(200);
@@ -230,21 +230,46 @@ assert.ok(saves[1].content.length > 100000, "MD 文件为完整内容");
 const cached2 = JSON.parse(store.get("dsx_exports"));
 assert.equal(cached2.length, 2, "缓存 2 条");
 assert.equal(cached2[0].name, saves[1].name, "最新在前");
-assert.ok(cached2[0].len > 80000, "缓存条目标记为大对话");
+assert.ok(cached2[0].len > 80000, "大对话条目");
+assert.ok(Array.isArray(cached2[0].units) && cached2[0].units.length >= 10, "导出时已分段");
+assert.equal(cached2[0].unitSent, 0, "分段进度初始为 0");
 const qk = btnByText("🌐 夸克浏览器");
 qk.onclick();
-const feedText = copies[4];
-assert.ok(feedText.length < 20000, "剪贴板只放精简包（原 11 万字符）");
-assert.ok(feedText.includes("精简接手包"), "走精简模式");
-assert.ok(feedText.includes("BIGDATA_"), "包含最新消息开头");
-assert.ok(!feedText.includes("ENDMARK"), "超长正文被截断");
-assert.ok(feedText.includes("最近") && feedText.includes("完整记录"), "说明更早内容在文件里");
+const unit1 = copies[4];
+assert.ok(unit1.length < 20000, "剪贴板只放第 1 段（原 11 万字符）");
+assert.ok(unit1.includes("将分") && unit1.includes("此为第 1/"), "首段带分段说明");
+assert.ok(unit1.includes("长对话开始"), "第 1 段从会话开头开始");
+assert.ok(!unit1.includes("ENDMARK"), "末尾内容不在第 1 段");
 assert.equal(opened[3], "com.quark.browser", "仍直接唤起夸克");
 toastEl = document.getElementById("dsx-toast");
-assert.ok(toastEl.textContent.includes("精简接手包"), "精简模式确认提示");
+assert.ok(toastEl.textContent.includes("复制下一段"), "提示接力操作");
+const unitLabelEl = strip.children[2].children[0];
+assert.ok(unitLabelEl.textContent.includes("已复制 1/"), "分段进度 1/N");
+assert.equal(fetchCalls, 3, "分段不重新拉接口");
+
+// 6) 「复制下一段」接力 → 第 2 段 → 点到末段（尾注）→ 重置
+const nextBtn = btnByText("复制下一段");
+nextBtn.onclick();
+const unit2 = copies[5];
+assert.ok(unit2.includes("第 2/") && unit2.includes("紧接上一条消息"), "下一段带接续说明");
+assert.ok(!unit2.startsWith("我想让你「接手」"), "后续段不再重复完整提示词");
+let guard = 0;
+while (guard++ < 60) {
+  const item = JSON.parse(store.get("dsx_exports"))[0];
+  if (item.unitSent >= item.units.length) break;
+  btnByText("复制下一段").onclick();
+}
+const lastUnit = copies[copies.length - 1];
+assert.ok(lastUnit.includes("ENDMARK"), "末段含对话结尾");
+assert.ok(lastUnit.includes("发送完毕"), "最后一段带完毕尾注");
+const finalItem = JSON.parse(store.get("dsx_exports"))[0];
+assert.equal(finalItem.unitSent, finalItem.units.length, "全部段落已取完");
+assert.equal(opened.length, 4, "下一段流程不反复打开应用");
+btnByText("重置").onclick();
+assert.equal(JSON.parse(store.get("dsx_exports"))[0].unitSent, 0, "重置生效");
 assert.ok(allElements.some((e) => e.textContent === "API 3 · 已存 2 · 失败 1"), "最终计数徽章");
-assert.ok(allElements.some((e) => (e.textContent || "").includes("大（发精简包）")),
+assert.ok(allElements.some((e) => (e.textContent || "").includes("大（分段复制）")),
   "列表条目标注大对话");
 
-console.log("✅ dsx_main.js 冒烟测试通过（MD导出/复制并打开/大对话自动精简包/无效token）");
+console.log("✅ dsx_main.js 冒烟测试通过（MD导出/复制并打开/大对话分段接力/无效token）");
 process.exit(0);

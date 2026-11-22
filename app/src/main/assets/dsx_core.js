@@ -255,40 +255,40 @@
     return L.join("\n");
   }
 
-  // ---------------- 精简接手包（喂给 AI 用，避免剪贴板超大卡顿） ----------------
+  // ---------------- 分段复制（大对话按 unit 拆分，适配应用输入框长度） ----------------
 
-  function digestMsgBlock(m, budget) {
-    let body = m.content || "（空消息）";
-    if (body.length > budget) body = body.slice(0, budget) + "…（该条过长已截断）";
-    const head = "【" + (m.role === "user" ? "用户" : "DeepSeek") + "】"
-      + (m.inserted_at ? " " + fmtDateTime(m.inserted_at) : "") + "\n";
-    return head + body + "\n";
-  }
-
-  /** 从最新一条往回取消息，正文总量不超过 maxChars；用于超大对话的复制/发送。 */
-  function buildDigest(s, maxChars) {
-    maxChars = maxChars || 6000;
-    const msgs = s.messages || [];
+  /** 把纯文本记录按「【用户】/【DeepSeek】」消息边界拆成 ≤ unitChars 的段；
+   *  超长单条消息按行（必要时按字符）硬切。返回原始分段数组，不带头尾包装。 */
+  function splitPlainUnits(plain, unitChars) {
+    unitChars = unitChars || 8000;
+    const budget = unitChars - 60;
     const blocks = [];
-    let used = 0;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const remain = maxChars - used;
-      if (remain <= 200 && blocks.length) break;
-      const block = digestMsgBlock(msgs[i], Math.min(2000, remain));
-      blocks.unshift(block);
-      used += block.length;
-      if (blocks.length >= 60) break;
+    let curLines = [];
+    for (const line of String(plain || "").split("\n")) {
+      if (/^【(用户|DeepSeek)】/.test(line)) {
+        if (curLines.length) blocks.push(curLines.join("\n"));
+        curLines = [];
+      }
+      curLines.push(line);
     }
-    const L = [];
-    L.push("DeepSeek 会话（精简接手包）");
-    L.push("标题：" + (s.title || "(未命名会话)"));
-    L.push("全部消息：" + msgs.length + " 条 · 以下为最近 " + blocks.length + " 条");
-    L.push("说明：思考过程与联网搜索已省略；完整记录在导出文件中（需要更早上下文时可上传该文件）。");
-    L.push("----------------");
-    for (const b of blocks) L.push(b);
-    L.push("----------------");
-    L.push("（以上为最近 " + blocks.length + " 条消息，完整记录共 " + msgs.length + " 条。）");
-    return L.join("\n");
+    if (curLines.length) blocks.push(curLines.join("\n"));
+
+    const units = [];
+    let cur = "";
+    for (let b of blocks) {
+      while (b.length > budget) {
+        let cut = b.lastIndexOf("\n", budget);
+        if (cut < Math.floor(budget * 0.5)) cut = budget;
+        if (cur.trim()) { units.push(cur.replace(/\n+$/, "")); cur = ""; }
+        units.push(b.slice(0, cut));
+        b = b.slice(cut).replace(/^\n+/, "");
+      }
+      const t = b + "\n\n";
+      if (cur && cur.length + t.length > budget) { units.push(cur.replace(/\n+$/, "")); cur = t; }
+      else cur += t;
+    }
+    if (cur.trim()) units.push(cur.replace(/\n+$/, ""));
+    return units.filter((u) => u.trim());
   }
 
   // ---------------- 单文件 HTML 导出 ----------------
@@ -343,7 +343,7 @@
     buildTxt,
     buildHtml,
     buildMd,
-    buildDigest,
+    splitPlainUnits,
     _extractMessage: extractMessage,
     _branchIds: branchIds,
   };
